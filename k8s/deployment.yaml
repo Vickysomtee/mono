@@ -22,11 +22,29 @@ spec:
           labelSelector:
             matchLabels:
               app: relay
+      initContainers:
+        - name: migrate
+          image: relay:latest
+          imagePullPolicy: IfNotPresent
+          command: ["node", "src/migrate.js"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: relay-secrets
+                  key: DATABASE_URL
+            - name: SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: relay-secrets
+                  key: SIGNING_SECRET
       containers:
         - name: relay
           image: relay:latest
+          imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 3000
+            - name: http
+              containerPort: 8080
           envFrom:
             - configMapRef:
                 name: relay-config
@@ -35,7 +53,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: relay-secrets
-                  key: database-url
+                  key: DATABASE_URL
             - name: SIGNING_SECRET
               valueFrom:
                 secretKeyRef:
@@ -44,7 +62,7 @@ spec:
           livenessProbe:
             httpGet:
               path: /health
-              port: 3000
+              port: http
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 1
