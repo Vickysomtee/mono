@@ -2,7 +2,7 @@ CLUSTER := relay
 IMAGE   := relay:latest
 URL     := http://localhost:8080
 
-.PHONY: cluster build load deploy up status logs loadtest clean
+.PHONY: cluster build load deploy up status logs smoke loadtest clean
 
 cluster:
 	kind create cluster --config kind-config.yaml
@@ -15,14 +15,19 @@ load:
 
 deploy:
 	kubectl apply -f k8s/
+	kubectl -n relay rollout status deploy/postgres --timeout=180s
+	kubectl -n relay rollout status deploy/relay --timeout=180s
 
 up: cluster build load deploy
 
 status:
-	kubectl -n relay get deploy,pods,svc,hpa -o wide
+	kubectl -n relay get deploy,pods,svc,hpa,pdb -o wide
 
 logs:
 	kubectl -n relay logs -l app=relay --tail=100 --prefix
+
+smoke:
+	sh tools/smoke.sh $(URL)
 
 # make loadtest RPS=150 DURATION=300
 RPS      ?= 150
