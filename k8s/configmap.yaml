@@ -6,4 +6,5 @@ metadata:
 data:
   PORT: "8080"
   PG_POOL_MAX: "25"
+  DEDUPE_MAX_ENTRIES: "10000"
   LOG_FILE: /var/log/relay/access.log
