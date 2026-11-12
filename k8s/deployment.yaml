@@ -6,7 +6,7 @@ metadata:
   labels:
     app: relay
 spec:
-  replicas: 1
+  replicas: 3
   selector:
     matchLabels:
       app: relay
@@ -15,10 +15,16 @@ spec:
       labels:
         app: relay
     spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: topology.kubernetes.io/zone
-          whenUnsatisfiable: DoNotSchedule
+          whenUnsatisfiable: ScheduleAnyway
           labelSelector:
             matchLabels:
               app: relay
@@ -38,6 +44,17 @@ spec:
                 secretKeyRef:
                   name: relay-secrets
                   key: SIGNING_SECRET
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
       containers:
         - name: relay
           image: relay:latest
@@ -59,14 +76,38 @@ spec:
                 secretKeyRef:
                   name: relay-secrets
                   key: SIGNING_SECRET
-          livenessProbe:
+          startupProbe:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 5
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
             periodSeconds: 5
-            timeoutSeconds: 1
-            failureThreshold: 2
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
           resources:
-            limits:
+            requests:
+              cpu: 250m
               memory: 256Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
