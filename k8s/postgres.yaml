@@ -1,0 +1,54 @@
+# LOCAL STAND-IN for the managed database.
+# In every real environment the database is a managed Postgres instance that
+# another team owns. This manifest exists only so the service has something to
+# talk to on a laptop. It is out of scope for the assessment.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: relay
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          args: ["-c", "max_connections=100"]
+          env:
+            - name: POSTGRES_USER
+              value: relay
+            - name: POSTGRES_PASSWORD
+              value: relay-local-pw
+            - name: POSTGRES_DB
+              value: relay
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "relay"]
+            periodSeconds: 2
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: relay
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
