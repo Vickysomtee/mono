@@ -1,23 +1,14 @@
 'use strict';
 
 const crypto = require('node:crypto');
-const fs = require('node:fs');
-const path = require('node:path');
 const express = require('express');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 
 const config = require('./config');
 const { pool } = require('./db');
 
-// ---------------------------------------------------------------- logging
-
-let accessLog = process.stdout;
-if (config.logFile) {
-  fs.mkdirSync(path.dirname(config.logFile), { recursive: true });
-  accessLog = fs.createWriteStream(config.logFile, { flags: 'a' });
-}
-
 function logRequest(req, res, startedAt) {
-  accessLog.write(
+  process.stdout.write(
     JSON.stringify({
       ts: new Date().toISOString(),
       method: req.method,
@@ -29,10 +20,8 @@ function logRequest(req, res, startedAt) {
   );
 }
 
-// ------------------------------------------------------------ idempotency
-
-// Replays are answered from this cache when this pod has seen the key, and
-// from the unique index on idempotency_key when it has not.
+// Replays are answered from this cache when we have seen the key on this pod,
+// and from the unique index on idempotency_key when we have not.
 const seen = new Map();
 
 function remember(key, id) {
@@ -42,19 +31,10 @@ function remember(key, id) {
   }
 }
 
-async function existingId(key) {
-  const { rows } = await pool.query('SELECT id FROM events WHERE idempotency_key = $1', [key]);
-  return rows.length > 0 ? rows[0].id : null;
-}
-
-// ---------------------------------------------------------------- archive
-
-let s3 = null;
+const s3 = config.archiveBucket ? new S3Client({}) : null;
 
 async function archive(id, payload) {
-  if (!config.archiveBucket) return;
-  const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
-  if (!s3) s3 = new S3Client({});
+  if (!s3) return;
   await s3.send(
     new PutObjectCommand({
       Bucket: config.archiveBucket,
@@ -64,8 +44,6 @@ async function archive(id, payload) {
     }),
   );
 }
-
-// -------------------------------------------------------------------- app
 
 const app = express();
 app.disable('x-powered-by');
@@ -77,7 +55,16 @@ app.use((req, res, next) => {
   next();
 });
 
+let shuttingDown = false;
+
+app.get('/live', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
 app.get('/health', async (req, res) => {
+  if (shuttingDown) {
+    return res.status(503).json({ status: 'draining' });
+  }
   try {
     await pool.query('SELECT 1');
     res.json({ status: 'ok' });
@@ -109,24 +96,29 @@ app.post('/events', async (req, res) => {
       'INSERT INTO events (id, idempotency_key, payload, signature) VALUES ($1, $2, $3, $4)',
       [id, key, payload, signature],
     );
-    remember(key, id);
-    await archive(id, payload);
-    res.status(201).json({ id, signature });
   } catch (err) {
     if (err.code === '23505') {
       try {
-        const previous = await existingId(key);
-        if (previous) {
-          remember(key, previous);
-          return res.status(409).json({ id: previous, duplicate: true });
+        const { rows } = await pool.query(
+          'SELECT id FROM events WHERE idempotency_key = $1',
+          [key],
+        );
+        if (rows.length > 0) {
+          remember(key, rows[0].id);
+          return res.status(409).json({ id: rows[0].id, duplicate: true });
         }
       } catch (lookupErr) {
         console.error('failed to resolve duplicate:', lookupErr.message);
       }
     }
     console.error('failed to store event:', err.message);
-    res.status(500).json({ error: 'internal error' });
+    return res.status(500).json({ error: 'internal error' });
   }
+
+  remember(key, id);
+  res.status(201).json({ id, signature });
+
+  archive(id, payload).catch((err) => console.error('archive failed:', id, err.message));
 });
 
 app.get('/events/:id', async (req, res) => {
@@ -143,6 +135,28 @@ app.get('/events/:id', async (req, res) => {
   }
 });
 
-app.listen(config.port, () => {
+const server = app.listen(config.port, () => {
   console.log(`relay listening on :${config.port} (pool max ${config.poolMax})`);
 });
+
+// Must stay above the ALB idle timeout or the balancer reuses sockets we just closed.
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
+
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`${signal} received, draining`);
+
+  server.close(() => {
+    pool.end().then(() => process.exit(0), () => process.exit(0));
+  });
+
+  setTimeout(() => {
+    console.error('grace period expired, exiting');
+    process.exit(1);
+  }, config.shutdownGraceMs).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
