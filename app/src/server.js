@@ -92,25 +92,27 @@ app.post('/events', async (req, res) => {
     .digest('hex');
 
   try {
-    await pool.query(
-      'INSERT INTO events (id, idempotency_key, payload, signature) VALUES ($1, $2, $3, $4)',
+    const inserted = await pool.query(
+      `INSERT INTO events (id, idempotency_key, payload, signature)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (idempotency_key) DO NOTHING
+       RETURNING id`,
       [id, key, payload, signature],
     );
-  } catch (err) {
-    if (err.code === '23505') {
-      try {
-        const { rows } = await pool.query(
-          'SELECT id FROM events WHERE idempotency_key = $1',
-          [key],
-        );
-        if (rows.length > 0) {
-          remember(key, rows[0].id);
-          return res.status(409).json({ id: rows[0].id, duplicate: true });
-        }
-      } catch (lookupErr) {
-        console.error('failed to resolve duplicate:', lookupErr.message);
+
+    if (inserted.rowCount === 0) {
+      const { rows } = await pool.query(
+        'SELECT id FROM events WHERE idempotency_key = $1',
+        [key],
+      );
+      if (rows.length === 0) {
+        console.error('conflict on %s but no row found', key);
+        return res.status(500).json({ error: 'internal error' });
       }
+      remember(key, rows[0].id);
+      return res.status(409).json({ id: rows[0].id, duplicate: true });
     }
+  } catch (err) {
     console.error('failed to store event:', err.message);
     return res.status(500).json({ error: 'internal error' });
   }
