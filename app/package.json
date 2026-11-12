@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node src/server.js",
     "migrate": "node src/migrate.js",
-    "dev": "node --env-file=.env src/server.js"
+    "dev": "node src/server.js"
   },
   "engines": {
     "node": ">=22"
