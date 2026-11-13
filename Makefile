@@ -16,8 +16,10 @@ load:
 # k8s/local holds the stand-in Secret and Postgres. Production gets k8s/base only.
 deploy:
 	kubectl apply -f k8s/base/ -f k8s/local/
+	kubectl -n kube-system rollout status deploy/metrics-server --timeout=180s
 	kubectl -n relay rollout status deploy/postgres --timeout=180s
 	kubectl -n relay rollout status deploy/relay --timeout=300s
+	kubectl -n relay wait --for=condition=ScalingActive hpa/relay --timeout=180s
 
 up: cluster build load deploy
 

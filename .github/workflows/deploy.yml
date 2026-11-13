@@ -63,3 +63,9 @@ jobs:
 
           kubectl -n relay rollout status deployment/relay --timeout=10m
           kubectl -n relay rollout history deployment/relay
+
+          # The Deployment has no replicas field, so the HPA owns the count.
+          # Without metrics-server the HPA cannot scale at all and production
+          # would quietly sit at one pod, so fail the deploy instead.
+          kubectl -n relay wait --for=condition=ScalingActive hpa/relay --timeout=3m
+          kubectl -n relay get hpa relay

@@ -72,8 +72,25 @@ superuser reserve and the migration connection.
 
 **The HPA could never have worked.** Scaling on CPU utilisation needs a CPU
 request and only `limits.memory` was set, so it reported `<unknown>` and sat at
-one replica. "Autoscaling is set up, 1-10 pods" was not true. Added requests,
-raised the floor to 3, added a PDB so a node drain cannot take it below 2.
+one replica. "Autoscaling is set up, 1-10 pods" was not true. Added
+`requests.cpu: 250m`, raised the floor to 3, added a PDB so a node drain cannot
+take it below 2.
+
+The Deployment also no longer declares `replicas`, because a Deployment under
+an HPA should not: every apply writes that number back, so a deploy during busy
+traffic scales the service down and the HPA has to climb again. `minReplicas`
+is the floor instead.
+
+That turns metrics-server into a requirement rather than a nice-to-have, and
+not in the way I expected. An HPA with no metrics cannot scale **at all**,
+including up to `minReplicas` - I scaled to one replica to check and it stayed
+there, reporting `AbleToScale: True` and `ScalingActive: False`. So a cluster
+without metrics-server plus a Deployment with no `replicas` field is a
+single-pod production, and the PDB's `minAvailable: 2` then blocks every
+voluntary eviction. Both `make deploy` and the deploy workflow now wait for
+`hpa/relay` to reach `ScalingActive`, so that fails loudly instead. EKS does
+not install metrics-server and neither does the Terraform, so somebody has to.
+`docs/SCALING.md` has the detail.
 
 **Probes were one database blip away from a full outage.** `/health` queries
 the database and liveness pointed at it with `failureThreshold: 2` and
@@ -149,9 +166,16 @@ deploy concurrency group so the two cannot race.
 
 Nothing ran on a pull request at all, which is the part I would fix first in
 any repo. `ci.yml` builds the image, brings up kind, and runs `make smoke`
-against three pods, plus `npm audit`, `terraform validate` and Trivy. That one
-cancels superseded runs, which is the opposite of the deploy job and
-deliberate.
+against three pods, plus `npm audit` and Trivy. That one cancels superseded
+runs, which is the opposite of the deploy job and deliberate.
+
+`terraform validate` is its own workflow rather than a job in `ci.yml`. It
+shares nothing with the other three - no application code, no Docker, no
+cluster - and it only has anything to say when `terraform/` changes, so it is
+path-filtered to that directory and gets its own status check. The catch is
+that a path-filtered workflow reports nothing on a PR that does not touch
+`terraform/`, so it must not be made a required check or those PRs wait for a
+run that will never happen.
 
 **Telemetry.** OpenTelemetry over OTLP to SigNoz Cloud, written up in
 `docs/OBSERVABILITY.md`. `http.server.request.duration` by route and status is
@@ -221,9 +245,13 @@ Would not work if applied:
 Also: EBS unencrypted, archive bucket has no public access block, versioning,
 encryption or lifecycle policy, and nothing is tagged.
 
-**No metrics-server on kind**, which is why the HPA still shows `<unknown>`
-locally. That is a kind limitation rather than a repo defect - the real defect,
-a missing CPU request, is fixed.
+**The HPA scaling under real load.** `k8s/local/metrics-server.yaml` is in the
+repo and CI proves the HPA reaches `ScalingActive` on a fresh cluster, but I
+could not install it on my own cluster - the sandbox blocks applying
+cluster-scoped RBAC into `kube-system` - so I have never watched it add a pod
+under CPU pressure. `70` as a utilisation target and the default five minute
+scale-down stabilisation are therefore untested numbers rather than measured
+ones.
 
 **No real test suite.** `make smoke` covers the behaviour I changed. A proper
 suite needs a database fixture, which is more than I wanted to add this week.
@@ -264,23 +292,29 @@ Conditions, in the order I would chase them:
    returns full stored payloads with no auth, behind an internet-facing
    listener on plain HTTP. This is the one that would change my answer to do
    not ship. *Platform, plus me.*
-2. **Someone creates the `relay-deploy` IAM role, the `production`
+2. **metrics-server installed on the production cluster.** The Deployment no
+   longer declares `replicas`, so without it the HPA cannot scale at all and
+   production runs on one pod. The deploy workflow fails rather than letting
+   that happen, which means the first deploy is blocked until this is done.
+   EKS does not ship it and the Terraform does not install it. *Platform,
+   needs ten minutes.*
+3. **Someone creates the `relay-deploy` IAM role, the `production`
    environment, and the production `relay-env` ConfigMap.** The pipeline
    expects OIDC and an approval gate; neither exists yet, so the first push to
    main fails at the credentials step until they do. `relay-env` carries the
    SigNoz endpoint, and without it the pods start with telemetry silently off.
    *Platform, needs an hour.*
-3. **Written confirmation of the connection budget from the data team**, and
+4. **Written confirmation of the connection budget from the data team**, and
    an answer on 400 vs 150 rps, because the pool maths depends on it.
-4. **The Terraform blockers above fixed before the first `apply`.** It has
+5. **The Terraform blockers above fixed before the first `apply`.** It has
    never been applied, so Friday is the first time anyone finds out what it
    really does. I would not discover that on launch day. *Me plus security.*
-5. **The four alerts in `docs/OBSERVABILITY.md` created, and someone on
+6. **The four alerts in `docs/OBSERVABILITY.md` created, and someone on
    call.** The metrics they need are arriving; the alerts are not created and
    the restart alert also needs the SigNoz k8s-infra chart installed, which is
    a separate job from instrumenting the app. *Platform.*
 
-If 1, 2 and 5 are not done by Thursday, this is a do not ship for me. They are
+If 1, 2, 3 and 6 are not done by Thursday, this is a do not ship for me. They are
 all a day's work, which is why the answer is conditions rather than no.
 
 ## Questions I would have asked

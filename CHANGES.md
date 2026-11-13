@@ -140,13 +140,14 @@ enough to bury real errors and make a duplicate-key alarm useless.
 | Added `imagePullPolicy: IfNotPresent` to every container | A `:latest` tag makes the kubelet default to `Always`, so it ignored the image `kind load` had just put on the node and tried to pull from Docker Hub. |
 | Added the `migrate` init container | Moves migrations out of the app container, running once before the app against the same image. |
 | Added the `wait-for-db` init container | `pg_isready` against `DATABASE_URL` every 2s, giving up after 120s. Without it the migrate container crash-loops on a cold cluster until the database answers, which self-heals but reads as a failure. |
+| Added `requests.cpu: 250m` | The HPA scales on CPU utilisation, which is a percentage of the request. With only `limits.memory` set it had nothing to compute against and reported `<unknown>`. This is also what the scheduler packs against. |
 | Added the telemetry env block | `OTEL_EXPORTER_OTLP_ENDPOINT` and `DEPLOY_ENV` from the `relay-env` ConfigMap, the ingestion key from `relay-secrets`, all `optional: true`, plus pod and node name through the downward API into `OTEL_RESOURCE_ATTRIBUTES`. Per-pod attribution is what made the cross-pod replay behaviour provable, and it is the same view you want in SigNoz. |
 
 ### Capacity and availability
 
 | Change | Why |
 |---|---|
-| `replicas: 1` to `3` | One replica is a single point of failure for a launch, and scaling up from one is slow. |
+| Removed the `replicas` field entirely | It was `1`. Setting it on a Deployment under an HPA means every apply writes that number back, so a deploy during busy traffic scales the service down and the HPA has to climb again. `minReplicas: 3` is the floor instead. This only works with metrics-server in the cluster, which is why that is now gated rather than assumed - see `docs/SCALING.md`. |
 | Added `requests: cpu 250m, memory 256Mi` | CPU-utilisation scaling needs a CPU request to compute a ratio against. Only `limits.memory` was set, so the HPA reported `<unknown>` and sat at one replica. "Autoscaling is set up, 1-10 pods" was not true. |
 | `limits.memory` 256Mi to 512Mi | Keeps the limit above the 384 MB heap so V8 can collect before the kernel intervenes. |
 | `whenUnsatisfiable: DoNotSchedule` to `ScheduleAnyway` | In production the node group is pinned to a single subnet, so a strict zone spread buys nothing and risks unschedulable pods. |
@@ -178,6 +179,19 @@ same as the real Secret. The endpoint is not a secret, so it does not belong in
 be checked locally and in CI without a SigNoz key. It is in `local/`, so
 production never gets it.
 
+## k8s/local/metrics-server.yaml (new)
+
+Upstream v0.7.2 `components.yaml` with one line added, `--kubelet-insecure-tls`,
+because kind's kubelets serve self-signed certificates and without it
+metrics-server never scrapes. That flag disables verification of the kubelet
+certificate, which is why the file is local-only; a real cluster installs the
+manifest unchanged.
+
+This closes the gap `NOTES.md` previously listed as unresolved: the HPA
+reported `<unknown>/70%` locally and could not be demonstrated. It is also now
+a requirement rather than a nice-to-have, because the Deployment no longer
+declares `replicas`.
+
 ## k8s/base/configmap.yaml
 
 | Change | Why |
@@ -195,7 +209,8 @@ Referencing the named port means it tracks the container definition.
 ## k8s/base/hpa.yaml
 
 `minReplicas: 1` to `3`. A `minReplicas: 1` HPA would immediately scale the
-deployment back down to one pod.
+deployment back down to one pod. With the `replicas` field now gone from the
+Deployment, this is the only thing holding the floor.
 
 ## k8s/base/pdb.yaml (new)
 
@@ -256,6 +271,7 @@ version. Related to, but not a fix for, the missing version constraint in
 | `:latest` to `:${{ github.sha }}` | You could not tell which commit was running, and there was no earlier image to roll back to. The tag is now the commit. |
 | `rollout restart` to `kubectl patch` | `rollout restart` only existed because pushing the same tag does not change the pod spec. With a SHA tag the image change is the rollout. The patch updates the `migrate` init container too, so migrations run from the same build as the app. |
 | Added `rollout status --timeout=10m` | The job went green the moment `rollout restart` was accepted, before a single new pod was Ready. A deploy that crash-looped reported success. |
+| Added a `ScalingActive` gate on the HPA | The Deployment no longer declares `replicas`, so the HPA owns the count. A cluster with no metrics-server cannot scale at all, not even up to `minReplicas`, and would run production on one pod with a green deploy. This turns that into a failed deploy. |
 | `set image` and a `change-cause` annotation in one `kubectl patch` | `rollout history` is what you read to pick a revision to go back to, and it was blank. Doing it as two calls relabels the revision that is already there, so the same commit appears twice; one patch puts the annotation on the new ReplicaSet only. |
 | `actions/checkout@master`, `configure-aws-credentials@master` to pinned SHAs | Mutable refs on third-party actions in a job that holds production AWS credentials. Whoever controls those branches could have run code in that context. |
 | Long-lived AWS keys to OIDC `role-to-assume` | `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` never expire and nobody rotates them. With OIDC there is no standing credential in the repo. |
@@ -284,7 +300,6 @@ Four jobs, each its own check so a red tick says what broke:
 |---|---|
 | `app` | `npm ci` against the lockfile, `node --check` on every source file, `npm audit --audit-level=high` on production deps |
 | `e2e` | Builds the image, brings up the real three-node kind cluster, applies `base` and `local`, runs `tools/smoke.sh`. Dumps pod state and logs on failure |
-| `terraform` | `fmt -check`, `init -backend=false`, `validate` - the check the brief asks for, run on every change instead of by hand |
 | `image` | Trivy on the built image, failing on HIGH and CRITICAL with `ignore-unfixed` so it blocks on things that can actually be patched |
 
 `cancel-in-progress: true` here, grouped per ref: a superseded run on the same
@@ -294,6 +309,22 @@ opposite of the deploy job and deliberately so.
 The `app` job is not a test suite - there is no test suite, and a real one
 needs a database fixture. `e2e` is the behavioural gate, and it fails against
 the old in-memory dedupe as soon as there is more than one pod.
+
+## .github/workflows/terraform.yml (new)
+
+Was a job inside `ci.yml`. Split out because it has nothing in common with the
+other three: it touches no application code, needs no Docker and no cluster,
+and only has anything to say when `terraform/` changes.
+
+As its own workflow it carries `paths: ['terraform/**']`, so it does not run on
+the majority of pull requests that do not touch infrastructure, and it gets its
+own status check rather than hiding inside a pass or fail that was really about
+the app. `workflow_dispatch` is there so it can be run by hand after a provider
+release without an empty commit.
+
+One consequence worth knowing: a path-filtered workflow reports nothing at all
+on a PR that does not touch `terraform/`. If it is ever made a required status
+check, those PRs will wait forever for a check that is never going to run.
 
 ## .github/workflows/rollback.yml (new)
 
@@ -311,6 +342,18 @@ can never touch the cluster at once, but with `cancel-in-progress: true`, which
 is the one place cancelling is right. A deploy sitting in `rollout status` would
 otherwise make an operator wait up to ten minutes to roll back, and the thing
 being cancelled is the deploy they are rolling back anyway.
+
+## docs/SCALING.md (new)
+
+Who owns the replica count and why the Deployment does not declare it, what
+the CPU request has to do with the HPA target, and the empirical result that
+an HPA with no metrics cannot scale even up to `minReplicas`. That last one is
+the opposite of what most people assume, which is why it is written down with
+the output rather than asserted.
+
+Also records what is still unverified: the HPA has never been seen scaling
+under real CPU load, so `70` as a target and the default scale-down
+stabilisation are both untested numbers.
 
 ## docs/OBSERVABILITY.md (new)
 
