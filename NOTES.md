@@ -90,7 +90,9 @@ first so it leaves rotation before the socket goes.
 
 **Migrations.** Every replica ran them on boot with no locking, so more than
 one pod meant pods racing the same `ALTER TABLE`. They are an init container
-now, and `migrate.js` takes an advisory lock, wraps each migration with its
+now, behind a second one that waits on `pg_isready` so a cold cluster does not
+crash-loop the migration while the database is still coming up, and
+`migrate.js` takes an advisory lock, wraps each migration with its
 version row in one transaction, and builds the unique index `CONCURRENTLY` so
 it does not hold `ACCESS EXCLUSIVE` on `events`. Migration 3 would also have
 failed outright if staging already had duplicate keys — worth checking before

@@ -108,8 +108,9 @@ enough to bury real errors and make a duplicate-key alarm useless.
 |---|---|
 | `secretKeyRef.key: database-url` to `DATABASE_URL` | The Secret defines `DATABASE_URL` and keys are case-sensitive. The pod never left `CreateContainerConfigError`. |
 | `containerPort: 3000` to `name: http, containerPort: 8080` | `PORT` was already 8080 in the ConfigMap, so the app listened there while Kubernetes probed and routed to 3000. Naming the port means the Service and probes reference the name and cannot drift again. |
-| Added `imagePullPolicy: IfNotPresent` to both containers | A `:latest` tag makes the kubelet default to `Always`, so it ignored the image `kind load` had just put on the node and tried to pull from Docker Hub. |
+| Added `imagePullPolicy: IfNotPresent` to every container | A `:latest` tag makes the kubelet default to `Always`, so it ignored the image `kind load` had just put on the node and tried to pull from Docker Hub. |
 | Added the `migrate` init container | Moves migrations out of the app container, running once before the app against the same image. |
+| Added the `wait-for-db` init container | `pg_isready` against `DATABASE_URL` every 2s, giving up after 120s. Without it the migrate container crash-loops on a cold cluster until the database answers, which self-heals but reads as a failure. |
 
 ### Capacity and availability
 

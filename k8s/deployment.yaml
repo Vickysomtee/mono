@@ -29,6 +29,36 @@ spec:
             matchLabels:
               app: relay
       initContainers:
+        - name: wait-for-db
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              for i in $(seq 1 60); do
+                pg_isready -q -d "$DATABASE_URL" && exit 0
+                sleep 2
+              done
+              echo "database not reachable after 120s"
+              exit 1
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: relay-secrets
+                  key: DATABASE_URL
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
         - name: migrate
           image: relay:latest
           imagePullPolicy: IfNotPresent
