@@ -20,6 +20,7 @@ deploy:
 	kubectl -n relay rollout status deploy/postgres --timeout=180s
 	kubectl -n relay rollout status deploy/relay --timeout=300s
 	kubectl -n relay wait --for=condition=ScalingActive hpa/relay --timeout=180s
+	sh tools/wait-scaled.sh
 
 up: cluster build load deploy
 

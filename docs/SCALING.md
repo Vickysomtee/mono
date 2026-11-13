@@ -37,8 +37,11 @@ blocks every voluntary eviction, so node drains and cluster upgrades hang.
 
 Two things guard against that:
 
-- `make deploy` waits on the metrics-server rollout and then on
-  `hpa/relay` reaching `ScalingActive`.
+- `make deploy` waits on the metrics-server rollout, then on `hpa/relay`
+  reaching `ScalingActive`, then on `tools/wait-scaled.sh`. The last one
+  matters because the Deployment is created at 1 and the HPA climbs to the
+  floor afterwards, so `rollout status` alone is satisfied at 1/1 and the
+  smoke test would run against a single pod.
 - `.github/workflows/deploy.yml` does the same after `rollout status`, so a
   production cluster without metrics-server fails the deploy rather than
   quietly running one pod.

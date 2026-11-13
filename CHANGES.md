@@ -240,9 +240,22 @@ longer possible to make by accident.
 
 | Change | Why |
 |---|---|
+| `deploy` waits for metrics-server, then `ScalingActive` on the HPA, then `tools/wait-scaled.sh` | The HPA owns the replica count now, so a deploy is not finished when the rollout converges - it is finished when the HPA is actually scaling and the floor is met. |
 | `deploy` waits on `rollout status` for postgres then relay | It returned success whether or not the rollout converged, which is the same reason the old CI job could not tell a failed deploy from a good one. It also fixes ordering, since relay's init container needs Postgres up. |
 | Added a `smoke` target | One command to check the behaviour that matters. |
 | `status` includes `pdb` | So the new object shows up in the standard view. |
+
+## tools/wait-scaled.sh (new)
+
+With no `replicas` field the Deployment is created at 1 and the HPA climbs to
+`minReplicas`. `rollout status` is satisfied at 1/1, so without this the smoke
+test could run against a single pod - and `tools/smoke.sh` only proves anything
+about cross-pod replay behaviour when there is more than one pod. CI would have
+gone green against the exact bug it exists to catch.
+
+Reads `minReplicas` from the HPA rather than hardcoding 3, and checks
+`readyReplicas` is at least that, so it still passes if the HPA has scaled
+above the floor.
 
 ## tools/smoke.sh (new)
 
