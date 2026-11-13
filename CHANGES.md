@@ -1,8 +1,7 @@
 # Changes
 
-Every change in this branch, file by file, with the reason. 17 files,
-+532/-92. `NOTES.md` has the ship call and the load test evidence; this is the
-line-by-line companion to it.
+Every change in this branch, file by file, with the reason. `NOTES.md` has the
+ship call and the load test evidence; this is the line-by-line companion to it.
 
 Changes marked **Blocker** are the ones that stopped `make up` producing a
 working service.
@@ -41,7 +40,7 @@ init container now.
 | Change | Why |
 |---|---|
 | `port` default 3000 to 8080 | The contract is 8080 everywhere. A default that contradicts it invites the mismatch that broke this deploy. |
-| `poolMax` default 25 to 8 | See the connection budget under `k8s/configmap.yaml`. |
+| `poolMax` default 25 to 8 | See the connection budget under `k8s/base/configmap.yaml`. |
 | `dedupeMaxEntries` default 0 to 10000, dropped the `0 means "no limit"` comment | A default meaning unbounded is a footgun: omitting the variable gave you an infinite cache. |
 | Removed `logFile` | Backs out file logging entirely. |
 | Added `shutdownGraceMs` | Needed by the drain path so the hard-exit timer is tunable. |
@@ -100,7 +99,7 @@ enough to bury real errors and make a duplicate-key alarm useless.
 |---|---|
 | Removed the `fs`/`path` imports and the write stream; log to `process.stdout` | `LOG_FILE` wrote into the container's writable layer with no volume and no rotation, growing until the node hit DiskPressure and evicted workloads. It also meant `kubectl logs` showed nothing. Removing it is what makes `readOnlyRootFilesystem` possible. |
 
-## k8s/deployment.yaml
+## k8s/base/deployment.yaml
 
 ### Blockers
 
@@ -137,7 +136,7 @@ enough to bury real errors and make a duplicate-key alarm useless.
 |---|---|
 | Pod `securityContext` (`runAsNonRoot`, `runAsUser`, `seccompProfile`) and per-container (`allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, `capabilities: drop: [ALL]`) | There was no security context at all. Only possible now that nothing writes a log file. |
 
-## k8s/configmap.yaml
+## k8s/base/configmap.yaml
 
 | Change | Why |
 |---|---|
@@ -145,26 +144,45 @@ enough to bury real errors and make a duplicate-key alarm useless.
 | Removed `LOG_FILE` | The disk exhaustion above. |
 | Added `DEDUPE_MAX_ENTRIES` | Makes the cache bound explicit and tunable rather than a code default. |
 
-## k8s/service.yaml
+## k8s/base/service.yaml
 
 `targetPort: 3000` to `targetPort: http`. The third leg of the port mismatch.
 Referencing the named port means it tracks the container definition.
 
-## k8s/hpa.yaml
+## k8s/base/hpa.yaml
 
 `minReplicas: 1` to `3`. A `minReplicas: 1` HPA would immediately scale the
 deployment back down to one pod.
 
-## k8s/pdb.yaml (new)
+## k8s/base/pdb.yaml (new)
 
 `minAvailable: 2`. There was no PodDisruptionBudget, so a node drain or cluster
 upgrade could evict every pod at once.
+
+## k8s/ split into base/ and local/
+
+`kubectl apply -f k8s/` was applying every file in the directory, including
+`secret.yaml` and `postgres.yaml`. In the deploy job that meant production's
+real Secret was overwritten with local placeholders and the single-replica
+stand-in database was installed into the prod cluster on every deploy.
+
+Nothing in the manifests tells you which files are safe to ship, so the
+directory now says it:
+
+| Path | Applied where |
+|---|---|
+| `k8s/base/` - namespace, configmap, deployment, service, hpa, pdb | Everywhere, including production |
+| `k8s/local/` - `secret.yaml`, `postgres.yaml` | kind and CI only |
+
+`make deploy` applies both. CI applies both, because it needs a database to
+test against. The deploy workflow applies `base` only, so the mistake is no
+longer possible to make by accident.
 
 ## Makefile
 
 | Change | Why |
 |---|---|
-| `deploy` waits on `rollout status` for postgres then relay | It returned success whether or not the rollout converged, which is the same reason the CI job cannot tell a failed deploy from a good one. It also fixes ordering, since relay's init container needs Postgres up. |
+| `deploy` waits on `rollout status` for postgres then relay | It returned success whether or not the rollout converged, which is the same reason the old CI job could not tell a failed deploy from a good one. It also fixes ordering, since relay's init container needs Postgres up. |
 | Added a `smoke` target | One command to check the behaviour that matters. |
 | `status` includes `pdb` | So the new object shows up in the standard view. |
 
@@ -187,12 +205,46 @@ Committed so `terraform validate` is reproducible against the same provider
 version. Related to, but not a fix for, the missing version constraint in
 `main.tf`, which is a review finding.
 
+## .github/workflows/deploy.yml
+
+| Change | Why |
+|---|---|
+| `kubectl apply -f k8s/` to `-f k8s/base/` | See above. This is the one that would have taken production down on the first deploy after launch. |
+| `:latest` to `:${{ github.sha }}` | You could not tell which commit was running, and there was no earlier image to roll back to. The tag is now the commit. |
+| `rollout restart` to `kubectl set image` | `rollout restart` only existed because pushing the same tag does not change the pod spec. With a SHA tag the image change is the rollout. `set image` also updates the `migrate` init container, so migrations run from the same build as the app. |
+| Added `rollout status --timeout=10m` | The job went green the moment `rollout restart` was accepted, before a single new pod was Ready. A deploy that crash-looped reported success. |
+| Added `rollout undo` on failure | A failed rollout leaves the old pods serving; this puts the deployment back to a known revision rather than leaving it half-updated. |
+| `actions/checkout@master`, `configure-aws-credentials@master` to pinned SHAs | Mutable refs on third-party actions in a job that holds production AWS credentials. Whoever controls those branches could have run code in that context. |
+| Long-lived AWS keys to OIDC `role-to-assume` | `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` never expire and nobody rotates them. With OIDC there is no standing credential in the repo. |
+| Added `permissions: contents: read` | The workflow inherited the org default, which on older repos is write-all on `GITHUB_TOKEN`. |
+| Added `environment: production` | A push to main reached production with no approval and no deployment record. |
+| Added `concurrency: deploy-production`, `cancel-in-progress: false` | Two pushes in quick succession raced each other. Deploys queue rather than cancel - killing a run mid-apply leaves the cluster halfway through a change with nothing to say which half. |
+| Replaced the hand-rolled ECR login with `amazon-ecr-login` | The `docker login` pipeline had no `--region` and failed silently on a token refresh. |
+| Added `workflow_dispatch` | So a deploy can be re-run without an empty commit. |
+
+## .github/workflows/ci.yml (new)
+
+Nothing ran on a pull request. `main` was the first place any code was tested,
+and the only thing it did there was deploy it.
+
+Four jobs, each its own check so a red tick says what broke:
+
+| Job | What it does |
+|---|---|
+| `app` | `npm ci` against the lockfile, `node --check` on every source file, `npm audit --audit-level=high` on production deps |
+| `e2e` | Builds the image, brings up the real three-node kind cluster, applies `base` and `local`, runs `tools/smoke.sh`. Dumps pod state and logs on failure |
+| `terraform` | `fmt -check`, `init -backend=false`, `validate` - the check the brief asks for, run on every change instead of by hand |
+| `image` | Trivy on the built image, failing on HIGH and CRITICAL with `ignore-unfixed` so it blocks on things that can actually be patched |
+
+`cancel-in-progress: true` here, grouped per ref: a superseded run on the same
+branch is worth nothing, so killing it just returns runner minutes. That is the
+opposite of the deploy job and deliberately so.
+
+The `app` job is not a test suite - there is no test suite, and a real one
+needs a database fixture. `e2e` is the behavioural gate, and it fails against
+the old in-memory dedupe as soon as there is more than one pod.
+
 ## Not changed
 
 `terraform/` is review-only per the brief, so all of its findings are written
-up in `NOTES.md` rather than fixed. `k8s/postgres.yaml` is out of scope.
-`.github/workflows/deploy.yml` is untouched and its findings are in `NOTES.md`
-- the two that would bite first are the `@master` refs on actions holding
-production AWS credentials, and `kubectl apply -f k8s/` applying `secret.yaml`
-and `postgres.yaml` to production, which overwrites the real secrets with the
-local placeholders.
+up in `NOTES.md` rather than fixed. `k8s/local/postgres.yaml` is out of scope.

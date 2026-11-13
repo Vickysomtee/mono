@@ -3,33 +3,56 @@ name: deploy
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+
+# Deploys queue, they do not cancel. Killing a run mid-apply leaves the
+# cluster halfway through a change with nothing to tell you which half.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 env:
   AWS_REGION: eu-west-1
   ECR_REPO: 123456789012.dkr.ecr.eu-west-1.amazonaws.com/relay
+  EKS_CLUSTER: relay-prod
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: aws-actions/configure-aws-credentials@master
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Login to ECR
-        run: aws ecr get-login-password | docker login --username AWS --password-stdin $ECR_REPO
+      - uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
 
       - name: Build and push
         run: |
-          docker build -t $ECR_REPO:latest app
-          docker push $ECR_REPO:latest
+          docker build -t "$ECR_REPO:$GITHUB_SHA" app
+          docker push "$ECR_REPO:$GITHUB_SHA"
 
-      - name: Deploy to production
+      - name: Deploy
         run: |
-          aws eks update-kubeconfig --name relay-prod
-          kubectl apply -f k8s/
-          kubectl -n relay rollout restart deployment/relay
+          aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+          kubectl apply -f k8s/base/
+          kubectl -n relay set image deployment/relay \
+            relay="$ECR_REPO:$GITHUB_SHA" \
+            migrate="$ECR_REPO:$GITHUB_SHA"
+          kubectl -n relay rollout status deployment/relay --timeout=10m
+
+      - name: Roll back
+        if: failure()
+        run: |
+          aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+          kubectl -n relay rollout undo deployment/relay
+          kubectl -n relay rollout status deployment/relay --timeout=10m

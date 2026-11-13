@@ -117,17 +117,31 @@ whatever this repo does, they have already been sitting in a shared archive.
 Container is non-root on `node:22-slim` with a read-only root filesystem and no
 capabilities. The image went from about 1.1 GB to 262 MB.
 
-## What I found and left
+**CI.** The deploy job ran `kubectl apply -f k8s/`, which includes
+`secret.yaml` and `postgres.yaml`. Every deploy overwrote production's real
+Secret with local placeholders and installed the single-replica stand-in
+database into the prod cluster. `k8s/` is split into `base/` and `local/` now
+and the job applies `base` only.
 
-**The CI pipeline.** `actions/checkout@master` and
-`configure-aws-credentials@master` are mutable refs on third-party actions in a
-job holding production AWS credentials — pin to SHAs and move to OIDC. More
-urgently, `kubectl apply -f k8s/` applies `secret.yaml` and `postgres.yaml` to
-production on every deploy, so it overwrites the real secrets with the local
-placeholders and installs the local stand-in database into the prod cluster.
-There is also no test, no scan, no `rollout status` gate, and `:latest` means
-nothing is traceable or rollback-able. I left it because it is a rewrite, not a
-patch, and I would rather agree the approach first.
+The rest of that job: `actions/checkout@master` and
+`configure-aws-credentials@master` were mutable refs on third-party actions in
+a step holding production AWS credentials, so they are pinned to SHAs and the
+credentials are OIDC now. `:latest` meant nothing was traceable or
+rollback-able, and `rollout restart` only existed to work around pushing the
+same tag — the image is tagged with the commit SHA and `kubectl set image`
+does the rollout. Nothing gated on the result, so the job reported success
+before a single new pod was Ready; it waits on `rollout status` and rolls back
+if that fails. Added a `permissions` block, a `production` environment, and
+`concurrency` that queues rather than cancels, because killing a run mid-apply
+leaves the cluster halfway through a change.
+
+Nothing ran on a pull request at all, which is the part I would fix first in
+any repo. `ci.yml` builds the image, brings up kind, and runs `make smoke`
+against three pods, plus `npm audit`, `terraform validate` and Trivy. That one
+cancels superseded runs, which is the opposite of the deploy job and
+deliberate.
+
+## What I found and left
 
 **Terraform** is review-only per the brief, so this is a list, not a diff.
 `terraform init -backend=false && terraform validate` passes.
@@ -204,9 +218,10 @@ Conditions, in the order I would chase them:
    returns full stored payloads with no auth, behind an internet-facing
    listener on plain HTTP. This is the one that would change my answer to do
    not ship. *Platform, plus me.*
-2. **The CI deploy job stops applying `secret.yaml` and `postgres.yaml` to
-   production.** As written, the first deploy after launch overwrites
-   production secrets with local placeholders. *Me, needs an hour.*
+2. **Someone creates the `relay-deploy` IAM role and the `production`
+   environment before the first deploy runs.** The pipeline expects OIDC and
+   an approval gate; neither exists yet, so the first push to main fails at
+   the credentials step until they do. *Platform, needs an hour.*
 3. **Written confirmation of the connection budget from the data team**, and
    an answer on 400 vs 150 rps, because the pool maths depends on it.
 4. **The Terraform blockers above fixed before the first `apply`.** It has
@@ -236,3 +251,8 @@ all a day's work, which is why the answer is conditions rather than no.
    runs against production.
 6. **What is the retention policy on `events`?** At 400 rps this is roughly
    250 GB a day and nobody has said what happens to it.
+7. **Where does the image actually go?** The deploy job pushes to
+   `123456789012.dkr.ecr.eu-west-1.amazonaws.com/relay`, which is a placeholder
+   account, and nothing in `terraform/` creates an ECR repository. I kept the
+   value so the diff stays readable, but it and `secrets.AWS_DEPLOY_ROLE_ARN`
+   both need filling in before the first deploy.
