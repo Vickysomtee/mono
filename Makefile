@@ -13,10 +13,11 @@ build:
 load:
 	kind load docker-image $(IMAGE) --name $(CLUSTER)
 
+# k8s/local holds the stand-in Secret and Postgres. Production gets k8s/base only.
 deploy:
-	kubectl apply -f k8s/
+	kubectl apply -f k8s/base/ -f k8s/local/
 	kubectl -n relay rollout status deploy/postgres --timeout=180s
-	kubectl -n relay rollout status deploy/relay --timeout=180s
+	kubectl -n relay rollout status deploy/relay --timeout=300s
 
 up: cluster build load deploy
 
