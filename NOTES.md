@@ -172,10 +172,12 @@ runs, which is the opposite of the deploy job and deliberate.
 `terraform validate` is its own workflow rather than a job in `ci.yml`. It
 shares nothing with the other three - no application code, no Docker, no
 cluster - and it only has anything to say when `terraform/` changes, so it is
-path-filtered to that directory and gets its own status check. The catch is
-that a path-filtered workflow reports nothing on a PR that does not touch
-`terraform/`, so it must not be made a required check or those PRs wait for a
-run that will never happen.
+path-filtered to that directory and gets its own status check. Two catches. On a
+`pull_request` the filter is matched against the whole PR diff rather than the
+push, so a PR that touches `terraform/` at all re-runs this on every later
+push. And it reports nothing on a PR that does not touch `terraform/`, so it
+must not be made a required check or those PRs wait for a run that will never
+happen.
 
 **Telemetry.** OpenTelemetry over OTLP to SigNoz Cloud, written up in
 `docs/OBSERVABILITY.md`. `http.server.request.duration` by route and status is

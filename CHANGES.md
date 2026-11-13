@@ -335,9 +335,13 @@ own status check rather than hiding inside a pass or fail that was really about
 the app. `workflow_dispatch` is there so it can be run by hand after a provider
 release without an empty commit.
 
-One consequence worth knowing: a path-filtered workflow reports nothing at all
-on a PR that does not touch `terraform/`. If it is ever made a required status
-check, those PRs will wait forever for a check that is never going to run.
+Two things about path filters that are easy to get wrong. On a
+`pull_request` the filter is evaluated against the whole PR diff, not the
+individual push, so a PR that touches `terraform/` anywhere in its history runs
+this workflow on every subsequent push - including pushes that change nothing
+but documentation. And a path-filtered workflow reports nothing at all on a PR
+that does not touch `terraform/`, so if it is ever made a required status check,
+those PRs will wait forever for a check that is never going to run.
 
 ## .github/workflows/rollback.yml (new)
 
