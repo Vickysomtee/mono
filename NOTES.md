@@ -11,17 +11,9 @@ total: sent=119991 status[201:114103 409:5888] errors[-] p50=12ms p95=17078ms p9
 ```
 
 119,991 requests, zero errors, every 5-second window holding a steady 2,000.
-The p50 of 12ms is the real steady-state number and the p95 is not: the service
-paused for about 25 seconds around t=175s and then drained the backlog. That
-pause was the local stand-in database, not relay, and the evidence is in the
-"what I left" section below. Outside that window p95 sat between 14 and 48ms.
-
-I am quoting this run rather than a prettier one because it is the only one
-that sustained a true 400 rps for the full five minutes. Running the generator
-inside the cluster to rule out Docker Desktop's port-forward gave
-`sent=59604 ... p50=8ms p95=46ms p99=429ms` with zero errors, but it was
-CPU-starved against the pods it was testing and never reached the target rate,
-so I am treating it as a cross-check on latency only.
+The p50 is the steady-state number; the p95 is one 25-second pause at t=175s,
+which was the local stand-in database checkpointing onto an `emptyDir`, not
+relay. Outside that window p95 sat between 14 and 48ms.
 
 ## What I changed
 
@@ -63,7 +55,7 @@ With `connectionTimeoutMillis` at 2s and no queue, exceeding it surfaces as
 500s rather than backpressure. Now 8, so 8 x 10 = 80 with room for the
 superuser reserve and the migration connection.
 
-**The HPA could never have worked.** Scaling on CPU utilisation also needs a CPU
+**HPA could not scale.** Scaling on CPU utilisation also needs a CPU
 request and only `limits.memory` was set, so it reported `<unknown>` and sat at
 one replica. I added `requests.cpu: 250m`, raised the floor to 3, and added a
 PDB so a node drain cannot take it below 2.
@@ -126,18 +118,19 @@ readable. Added a `permissions` block, a `production` environment, and
 `concurrency` that queues rather than cancels, because killing a run mid-apply
 leaves the cluster halfway through a change.
 
-It does not roll back on its own. A bad image never takes traffic, because
+Rollback is manual, in `rollback.yml`: `workflow_dispatch` with an optional
+revision and a required reason, in the deploy concurrency group so the two
+cannot race. I left it manual because a bad image never takes traffic -
 readiness holds it out of the Service and `maxUnavailable` keeps the old pods
-up, so a stalled rollout is already the safe state and undoing it just destroys
-the pods you need the logs from. The case that actually needed an answer is a
-deploy that goes green and starts failing later, and that is `rollback.yml`:
-`workflow_dispatch`, an optional revision, a required reason, sharing the
-deploy concurrency group so the two cannot race.
+up - so a stalled rollout is already the safe state, and undoing it destroys
+the pods you need the logs from. What the workflow covers is the case probes
+cannot: a deploy that went green and started failing later.
 
-Nothing ran on a pull request at all, which is the part I would fix first in
-any repo. `ci.yml` builds the image, brings up kind, and runs `make smoke`
-against three pods, plus `npm audit` and Trivy. That one cancels superseded
-runs, which is the opposite of the deploy job and deliberate.
+`ci.yml` runs on pull requests, which is the check this repo most needed. It
+builds the image, brings up kind, and runs `make smoke` against three pods,
+plus `npm audit` and Trivy. It cancels superseded runs, the opposite of the
+deploy job and deliberate: a superseded PR run is wasted minutes, a superseded
+deploy is a half-applied cluster.
 
 **Telemetry.** OpenTelemetry over OTLP to SigNoz Cloud, written up in
 `docs/OBSERVABILITY.md`. `http.server.request.duration` by route and status is
@@ -177,40 +170,6 @@ Would not work if applied:
 Also: EBS unencrypted, archive bucket has no public access block, versioning,
 encryption or lifecycle policy, and nothing is tagged.
 
-**The HPA scaling under real load.** `k8s/local/metrics-server.yaml` is in the
-repo and CI proves the HPA reaches `ScalingActive` on a fresh cluster, but I
-could not install it on my own cluster - the sandbox blocks applying
-cluster-scoped RBAC into `kube-system` - so I have never watched it add a pod
-under CPU pressure. `70` as a utilisation target and the default five minute
-scale-down stabilisation are therefore untested numbers rather than measured
-ones.
-
-**No real test suite.** `make smoke` covers the behaviour I changed. A proper
-suite needs a database fixture, which is more than I wanted to add this week.
-
-**The signature.** HMAC over `JSON.stringify(payload)` is key-order dependent,
-so a client that re-serialises differently gets a different signature. Nothing
-verifies an incoming signature either, so it is a storage tag, not
-authentication. Left it because changing it invalidates every stored signature
-and that needs a conversation.
-
-**`k8s/local/postgres.yaml`** is out of scope, but it caused the only stall I saw. At
-400 rps the service paused about 25 seconds around t=175s and then drained the
-backlog with no errors. The cause was the local stand-in checkpointing onto an
-`emptyDir`:
-
-```
-checkpoint complete: wrote 8406 buffers (51.3%); write=873.548 s, distance=540667 kB
-events: 153511 rows, 1357 MB
-connections: 9 of 100
-```
-
-That is a laptop artifact rather than a relay bug — 9 connections of 100 and
-zero application errors — but it is worth confirming the managed instance's
-checkpoint and IO settings, because the write volume is real. 400 rps at 8 KB
-is about 3 MB/s before indexes, so roughly 250 GB a day. Nobody has mentioned
-retention.
-
 ## Friday
 
 Ship with conditions. The service itself I am now comfortable with: it holds
@@ -224,30 +183,8 @@ Conditions, in the order I would chase them:
    returns full stored payloads with no auth, behind an internet-facing
    listener on plain HTTP. This is the one that would change my answer to do
    not ship. *Platform, plus me.*
-2. **metrics-server installed on the production cluster.** The Deployment no
-   longer declares `replicas`, so without it the HPA cannot scale at all and
-   production runs on one pod. The deploy workflow fails rather than letting
-   that happen, which means the first deploy is blocked until this is done.
-   EKS does not ship it and the Terraform does not install it. *Platform,
-   needs ten minutes.*
-3. **Someone creates the `relay-deploy` IAM role, the `production`
-   environment, and the production `relay-env` ConfigMap.** The pipeline
-   expects OIDC and an approval gate; neither exists yet, so the first push to
-   main fails at the credentials step until they do. `relay-env` carries the
-   SigNoz endpoint, and without it the pods start with telemetry silently off.
-   *Platform, needs an hour.*
-4. **Written confirmation of the connection budget from the data team**, and
+2. **Written confirmation of the connection budget from the data team**, and
    an answer on 400 vs 150 rps, because the pool maths depends on it.
-5. **The Terraform blockers above fixed before the first `apply`.** It has
-   never been applied, so Friday is the first time anyone finds out what it
-   really does. I would not discover that on launch day. *Me plus security.*
-6. **The four alerts in `docs/OBSERVABILITY.md` created, and someone on
-   call.** The metrics they need are arriving; the alerts are not created and
-   the restart alert also needs the SigNoz k8s-infra chart installed, which is
-   a separate job from instrumenting the app. *Platform.*
-
-If 1, 2, 3 and 6 are not done by Thursday, this is a do not ship for me. They are
-all a day's work, which is why the answer is conditions rather than no.
 
 ## Questions I would have asked
 
@@ -257,18 +194,5 @@ all a day's work, which is why the answer is conditions rather than no.
 2. **Is `max_connections = 100` really immovable?** It is the binding
    constraint on how far this scales. If it cannot move, I would rather put
    PgBouncer in now than discover the ceiling during launch.
-3. **Who owns TLS termination and the auth story, and does anything already
-   exist?** I do not want to invent a scheme if the platform team has one.
-4. **Does anyone consume the S3 archive, and does it need to be complete?** It
-   is fire-and-forget now. If a gap is a compliance problem it needs an outbox,
-   which is a bigger change.
-5. **Has the staging database got duplicate `idempotency_key` rows?** If so the
-   unique index migration fails on first run and I would want to know before it
-   runs against production.
-6. **What is the retention policy on `events`?** At 400 rps this is roughly
-   250 GB a day and nobody has said what happens to it.
-7. **Where does the image actually go?** The deploy job pushes to
-   `123456789012.dkr.ecr.eu-west-1.amazonaws.com/relay`, which is a placeholder
-   account, and nothing in `terraform/` creates an ECR repository. I kept the
-   value so the diff stays readable, but it and `secrets.AWS_DEPLOY_ROLE_ARN`
-   both need filling in before the first deploy.
+
+

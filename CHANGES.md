@@ -187,10 +187,10 @@ metrics-server never scrapes. That flag disables verification of the kubelet
 certificate, which is why the file is local-only; a real cluster installs the
 manifest unchanged.
 
-This closes the gap `NOTES.md` previously listed as unresolved: the HPA
-reported `<unknown>/70%` locally and could not be demonstrated. It is also now
-a requirement rather than a nice-to-have, because the Deployment no longer
-declares `replicas`.
+Without it the HPA reports `<unknown>/70%` and cannot scale. It is a
+requirement rather than a nice-to-have now, because the Deployment no longer
+declares `replicas`, so an HPA that cannot scale means a single-pod
+production.
 
 ## k8s/base/configmap.yaml
 
