@@ -55,6 +55,8 @@ OpenTelemetry over OTLP to SigNoz Cloud. Full write-up in
 | `/health` and `/live` excluded | Probed every few seconds by every pod. Counted, they are most of the request rate at idle and they drag the percentiles down. Kubernetes already acts on a failing probe. |
 | Starts only if `OTEL_EXPORTER_OTLP_ENDPOINT` is set | Otherwise the SDK defaults to `localhost:4318` and fills the log with connection errors in kind and in CI. |
 | No custom metrics | The `pg` instrumentation already exports `db.client.connection.count`, `.max` and `.pending_requests`, which is the pool saturation signal I was going to write by hand. |
+| Wrapped both exporters to log export failures and recoveries | The SDK reports them only at its debug level, which also logs a line per request. A wrong endpoint or a rejected ingestion key otherwise looks exactly like working telemetry. One line per transition, not per attempt. |
+| `setGlobalErrorHandler` to a one-line log | The default handler prints the whole error object with its stack on every export interval, which during a backend outage is a stack trace every 30 seconds per pod. |
 
 ## app/src/config.js
 

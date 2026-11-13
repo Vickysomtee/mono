@@ -173,9 +173,21 @@ Cloud itself is unverified: what I checked is that the app emits those metrics
 and spans, with those attributes, against a real collector in the cluster. The
 collector-to-SigNoz hop is an endpoint and a key.
 
-I also checked what happens when the backend is down. Collector scaled to zero,
-30 requests plus the smoke test: all passed, zero restarts, nothing in the app
-log. An observability outage does not become a relay outage.
+I also checked what happens when the backend is down. Collector scaled to zero:
+requests and the smoke test all passed, zero restarts. An observability outage
+does not become a relay outage.
+
+That one needed a fix, though. The SDK reports export failures only at its debug
+level, which also logs a line per request, so a wrong endpoint or a rejected key
+looked exactly like working telemetry. Each exporter now logs one line when it
+starts failing and one when it recovers, verified both ways:
+
+```
+telemetry: trace export failing: connect ECONNREFUSED 10.96.251.236:4318
+telemetry: metric export failing: connect ECONNREFUSED 10.96.251.236:4318
+telemetry: trace export recovered
+telemetry: metric export recovered
+```
 
 ## What I found and left
 

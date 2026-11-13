@@ -73,6 +73,44 @@ observed healthy behaviour.
 The first three come from app data that is already arriving. The fourth does
 not: it needs cluster metrics collected, which nobody has set up yet.
 
+## Confirming it works
+
+The startup line only proves the SDK started:
+
+```
+telemetry exporting to https://ingest.<region>.signoz.cloud:443
+```
+
+A rejected key or a wrong endpoint shows up as one line per signal, and one
+more when it recovers:
+
+```
+telemetry: trace export failing: <reason>
+telemetry: metric export failing: <reason>
+telemetry: trace export recovered
+```
+
+If neither appears and data is not in SigNoz, the SDK never started, which
+means `OTEL_EXPORTER_OTLP_ENDPOINT` did not reach the pod.
+
+Pods need outbound 443 to `ingest.<region>.signoz.cloud`. The nodes are in
+public subnets, so this works today, but an egress NetworkPolicy would break it
+and the only symptom is the export-failing line above.
+
+## A sampling consequence worth knowing
+
+SigNoz's Services view builds its numbers from the spans it receives. At 10%
+sampling the request rate there reads about a tenth of the truth. Latency
+percentiles are roughly right, because a uniform sample does not shift the
+distribution, and error rate as a ratio is roughly right too, but counts are
+not.
+
+So build the RED dashboard and the alerts on `http.server.request.duration`,
+which is unsampled, and treat the Services view as a way in to traces rather
+than a source of numbers. If you would rather have one source of truth, set
+`OTEL_TRACES_SAMPLER_ARG` to `1.0` in `relay-config` and accept the span
+volume: at 400 rps that is roughly 34 million spans a day.
+
 ## Not done
 
 No logs pipeline. Access logs go to stdout as JSON and are whatever the cluster
