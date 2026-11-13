@@ -13,9 +13,17 @@ build:
 load:
 	kind load docker-image $(IMAGE) --name $(CLUSTER)
 
-# k8s/local holds the stand-in Secret and Postgres. Production gets k8s/base only.
+# k8s/local holds the stand-in Secret, Postgres, collector and metrics-server.
+# Production gets k8s/base only.
+#
+# kubectl applies -f sources in the order given. The namespace comes first
+# because everything in k8s/local lives in it, then local, then base, so
+# metrics-server and Postgres are already running when the relay Deployment
+# and its HPA appear. Otherwise relay is created at one replica and waits for
+# the HPA to come alive, and its wait-for-db container retries until Postgres
+# is reachable.
 deploy:
-	kubectl apply -f k8s/base/ -f k8s/local/
+	kubectl apply -f k8s/base/00-namespace.yaml -f k8s/local/ -f k8s/base/
 	kubectl -n kube-system rollout status deploy/metrics-server --timeout=180s
 	kubectl -n relay rollout status deploy/postgres --timeout=180s
 	kubectl -n relay rollout status deploy/relay --timeout=300s

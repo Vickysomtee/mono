@@ -240,6 +240,7 @@ longer possible to make by accident.
 
 | Change | Why |
 |---|---|
+| `deploy` applies the namespace, then `k8s/local/`, then `k8s/base/` | `kubectl` applies `-f` sources in the order given, so this puts metrics-server and Postgres up before the relay Deployment and its HPA exist. Otherwise relay is created at one replica and sits there until the HPA comes alive, and its `wait-for-db` container retries until Postgres answers. The namespace goes first because everything in `k8s/local` lives in it. |
 | `deploy` waits for metrics-server, then `ScalingActive` on the HPA, then `tools/wait-scaled.sh` | The HPA owns the replica count now, so a deploy is not finished when the rollout converges - it is finished when the HPA is actually scaling and the floor is met. |
 | `deploy` waits on `rollout status` for postgres then relay | It returned success whether or not the rollout converged, which is the same reason the old CI job could not tell a failed deploy from a good one. It also fixes ordering, since relay's init container needs Postgres up. |
 | Added a `smoke` target | One command to check the behaviour that matters. |
