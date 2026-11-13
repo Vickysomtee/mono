@@ -132,7 +132,7 @@ can pull from ECR. It is kept out of this repo's history entirely and
 whatever this repo does, they have already been sitting in a shared archive.
 
 Container is non-root on `node:22-slim` with a read-only root filesystem and no
-capabilities. The image went from about 1.1 GB to 258 MB. npm is deleted from
+capabilities. The image went from about 1.1 GB to 288 MB. npm is deleted from
 the runtime stage - nothing shells out to it, and the copy the base image ships
 was the source of all 10 HIGH findings Trivy raised. The app's own dependencies
 are clean.

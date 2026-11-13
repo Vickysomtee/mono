@@ -5,7 +5,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-FROM node:22-slim
+FROM node:22-slim AS runtime
 
 ENV NODE_ENV=production
 ENV NODE_OPTIONS=--max-old-space-size=384

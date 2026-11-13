@@ -11,7 +11,7 @@ working service.
 | Change | Why |
 |---|---|
 | `COPY package.json .` to `COPY package.json package-lock.json ./` | **Blocker.** `npm ci` refuses to run without a lockfile, so the build failed before anything else could be reached. |
-| `FROM node:22` to `node:22-slim` | The full Debian image is about 1.1 GB with a large CVE surface. The image is now 258 MB. |
+| `FROM node:22` to `node:22-slim` | The full Debian image is about 1.1 GB with a large CVE surface. On `-slim` the image was 258 MB, and 288 MB once the OpenTelemetry dependencies landed. |
 | `COPY . .` + `RUN rm -f .env` to `COPY src ./src` | The old form copied `.env` into a layer and deleted it in a later one. Deleted files stay readable in the earlier layer, so the staging password shipped inside any image pushed to ECR. |
 | Added `USER node` | The container ran as root. Nothing needs root at runtime. |
 | `EXPOSE 3000` to `8080` | Simply wrong, and misleading to the next person. |
@@ -360,6 +360,18 @@ can never touch the cluster at once, but with `cancel-in-progress: true`, which
 is the one place cancelling is right. A deploy sitting in `rollout status` would
 otherwise make an operator wait up to ten minutes to roll back, and the thing
 being cancelled is the deploy they are rolling back anyway.
+
+## docs/RUNBOOK.md (new)
+
+Running the thing from nothing: prerequisites, what each `make` target
+actually does, how to check it worked, the rebuild loop after a code change,
+pointing telemetry at SigNoz without committing a key, and teardown.
+
+The troubleshooting section is the failures I actually hit rather than a
+generic list -- pods stuck in `Init:0/2` waiting on Postgres, `make deploy`
+stopping at the `ScalingActive` wait when metrics-server is missing,
+`ErrImagePull` from skipping `make load`, and Docker Desktop's TLS handshake
+timeouts on image pulls. Each one with the command that tells you which it is.
 
 ## docs/SCALING.md (new)
 
