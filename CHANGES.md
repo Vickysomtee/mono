@@ -147,7 +147,7 @@ enough to bury real errors and make a duplicate-key alarm useless.
 
 | Change | Why |
 |---|---|
-| Removed the `replicas` field entirely | It was `1`. Setting it on a Deployment under an HPA means every apply writes that number back, so a deploy during busy traffic scales the service down and the HPA has to climb again. `minReplicas: 3` is the floor instead. This only works with metrics-server in the cluster, which is why that is now gated rather than assumed - see `docs/SCALING.md`. |
+| Removed the `replicas` field entirely | It was `1`. Setting it on a Deployment under an HPA means every apply writes that number back, so a deploy during busy traffic scales the service down and the HPA has to climb again. `minReplicas: 3` is the floor instead. This only works with metrics-server in the cluster, which is why that is now gated rather than assumed. |
 | Added `requests: cpu 250m, memory 256Mi` | CPU-utilisation scaling needs a CPU request to compute a ratio against. Only `limits.memory` was set, so the HPA reported `<unknown>` and sat at one replica. "Autoscaling is set up, 1-10 pods" was not true. |
 | `limits.memory` 256Mi to 512Mi | Keeps the limit above the 384 MB heap so V8 can collect before the kernel intervenes. |
 | `whenUnsatisfiable: DoNotSchedule` to `ScheduleAnyway` | In production the node group is pinned to a single subnet, so a strict zone spread buys nothing and risks unschedulable pods. |
@@ -372,18 +372,6 @@ generic list -- pods stuck in `Init:0/2` waiting on Postgres, `make deploy`
 stopping at the `ScalingActive` wait when metrics-server is missing,
 `ErrImagePull` from skipping `make load`, and Docker Desktop's TLS handshake
 timeouts on image pulls. Each one with the command that tells you which it is.
-
-## docs/SCALING.md (new)
-
-Who owns the replica count and why the Deployment does not declare it, what
-the CPU request has to do with the HPA target, and the empirical result that
-an HPA with no metrics cannot scale even up to `minReplicas`. That last one is
-the opposite of what most people assume, which is why it is written down with
-the output rather than asserted.
-
-Also records what is still unverified: the HPA has never been seen scaling
-under real CPU load, so `70` as a target and the default scale-down
-stabilisation are both untested numbers.
 
 ## docs/OBSERVABILITY.md (new)
 

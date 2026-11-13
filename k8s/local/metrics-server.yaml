@@ -4,7 +4,7 @@
 #
 # This file is local only because of that flag. A real cluster needs
 # metrics-server too, without it, or the HPA cannot scale and the Deployment
-# sits at whatever replica count it was created with. See docs/SCALING.md.
+# sits at whatever replica count it was created with.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

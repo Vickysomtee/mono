@@ -10,7 +10,7 @@ spec:
   # means every apply resets it to 3 and fights whatever the HPA chose.
   # minReplicas is the floor instead. This needs metrics-server in the
   # cluster; without it the HPA cannot scale at all, not even up to
-  # minReplicas. See docs/SCALING.md.
+  # minReplicas.
   selector:
     matchLabels:
       app: relay

@@ -25,7 +25,7 @@ so I am treating it as a cross-check on latency only.
 
 ## What I changed
 
-**Got it to start.** Three separate things stopped it, all in commit 2:
+**Got it to start.** Three separate things stopped it.
 
 - `npm ci` needs the lockfile and the image never copied it, so the build
   failed before anything else could.
@@ -57,40 +57,21 @@ relay-...-gm7zm: 5 requests
 All three pods served that key and all three agreed on the id. `make smoke`
 asserts this and fails against the old code once you scale past one pod.
 
-The same `Map` was also an unbounded leak: `DEDUPE_MAX_ENTRIES` defaulted to 0
-meaning "no limit" and it held the whole 8 KB payload per key. At 400 rps that
-is roughly 3 MB/s retained against a 256 Mi limit. That is the OOM in the
-handoff. Raising the heap to 512 MB made it worse, not better, because the
-limit was 256 Mi, so the kernel killed the container before V8 had any reason
-to collect.
-
 **Connection budget.** The database caps at 100 and the data team will not
 raise it. `PG_POOL_MAX` was 25 against `maxReplicas: 10`, which asks for 250.
 With `connectionTimeoutMillis` at 2s and no queue, exceeding it surfaces as
 500s rather than backpressure. Now 8, so 8 x 10 = 80 with room for the
 superuser reserve and the migration connection.
 
-**The HPA could never have worked.** Scaling on CPU utilisation needs a CPU
+**The HPA could never have worked.** Scaling on CPU utilisation also needs a CPU
 request and only `limits.memory` was set, so it reported `<unknown>` and sat at
-one replica. "Autoscaling is set up, 1-10 pods" was not true. Added
-`requests.cpu: 250m`, raised the floor to 3, added a PDB so a node drain cannot
-take it below 2.
+one replica. I added `requests.cpu: 250m`, raised the floor to 3, and added a
+PDB so a node drain cannot take it below 2.
 
-The Deployment also no longer declares `replicas`, because a Deployment under
-an HPA should not: every apply writes that number back, so a deploy during busy
-traffic scales the service down and the HPA has to climb again. `minReplicas`
-is the floor instead.
-
-That turns metrics-server into a requirement rather than a nice-to-have, and
-not in the way I expected. An HPA with no metrics cannot scale **at all**,
-including up to `minReplicas` - I scaled to one replica to check and it stayed
-there, reporting `AbleToScale: True` and `ScalingActive: False`. So a cluster
-without metrics-server plus a Deployment with no `replicas` field is a
-single-pod production, and the PDB's `minAvailable: 2` then blocks every
-voluntary eviction. Both `make deploy` and the deploy workflow now wait for
-`hpa/relay` to reach `ScalingActive`, so that fails loudly instead. EKS does
-not install metrics-server and neither does the Terraform, so somebody has to.
-`docs/SCALING.md` has the detail.
+**Added a metrics-server deployment.** An HPA with no metrics cannot scale
+**at all**: the HPA reported `AbleToScale: True` and `ScalingActive: False`. So
+a cluster without metrics-server does not autoscale, because the HPA depends on
+it for the scaling metrics.
 
 **Probes were one database blip away from a full outage.** `/health` queries
 the database and liveness pointed at it with `failureThreshold: 2` and
@@ -99,25 +80,17 @@ and restarts the entire deployment at once. Liveness now hits `/live`, which
 only proves the process is up. Readiness keeps the database check, because that
 is what should gate traffic. Added a startup probe.
 
-**Deploys were not zero-downtime.** `sh` was PID 1 and npm does not forward
-signals, so SIGTERM never reached node and every pod was SIGKILLed after the
-grace period with requests in flight. The image execs node directly now and the
-process drains the listener and the pool, reporting `draining` from `/health`
-first so it leaves rotation before the socket goes.
-
 **Migrations.** Every replica ran them on boot with no locking, so more than
 one pod meant pods racing the same `ALTER TABLE`. They are an init container
 now, behind a second one that waits on `pg_isready` so a cold cluster does not
 crash-loop the migration while the database is still coming up, and
 `migrate.js` takes an advisory lock, wraps each migration with its
 version row in one transaction, and builds the unique index `CONCURRENTLY` so
-it does not hold `ACCESS EXCLUSIVE` on `events`. Migration 3 would also have
-failed outright if staging already had duplicate keys — worth checking before
-this runs anywhere real.
+it does not hold `ACCESS EXCLUSIVE` on `events`.
 
 **Logging.** `LOG_FILE` wrote to `/var/log/relay` inside the container with no
 volume and no rotation, so it grew on the node's disk until eviction, and
-`kubectl logs` showed nothing. Access logs go to stdout.
+`kubectl logs` showed nothing. Access logs now directly go to stdout.
 
 **S3 archive was in the request path.** Awaited before the 201, so a slow
 bucket showed up directly in client latency, and an S3 error returned 500 for
@@ -128,14 +101,11 @@ stored. It runs after the response now.
 secret, `.gitignore` never covered `.env`, and the Dockerfile copied it in and
 `rm`'d it in a later layer, which leaves it readable in the image to anyone who
 can pull from ECR. It is kept out of this repo's history entirely and
-`.dockerignore` keeps it out of the image. Both values still need rotating —
-whatever this repo does, they have already been sitting in a shared archive.
+`.dockerignore` keeps it out of the image.
 
-Container is non-root on `node:22-slim` with a read-only root filesystem and no
-capabilities. The image went from about 1.1 GB to 288 MB. npm is deleted from
-the runtime stage - nothing shells out to it, and the copy the base image ships
-was the source of all 10 HIGH findings Trivy raised. The app's own dependencies
-are clean.
+Container is non-root on `node:22-slim` with a read-only root filesystem, built
+in multiple stages. The image went from about 1.1 GB to 288 MB. npm is deleted
+from the runtime stage.
 
 **CI.** The deploy job ran `kubectl apply -f k8s/`, which includes
 `secret.yaml` and `postgres.yaml`. Every deploy overwrote production's real
@@ -169,51 +139,11 @@ any repo. `ci.yml` builds the image, brings up kind, and runs `make smoke`
 against three pods, plus `npm audit` and Trivy. That one cancels superseded
 runs, which is the opposite of the deploy job and deliberate.
 
-`terraform validate` is its own workflow rather than a job in `ci.yml`. It
-shares nothing with the other three - no application code, no Docker, no
-cluster - and it only has anything to say when `terraform/` changes, so it is
-path-filtered to that directory and gets its own status check. Two catches. On a
-`pull_request` the filter is matched against the whole PR diff rather than the
-push, so a PR that touches `terraform/` at all re-runs this on every later
-push. And it reports nothing on a PR that does not touch `terraform/`, so it
-must not be made a required check or those PRs wait for a run that will never
-happen.
-
 **Telemetry.** OpenTelemetry over OTLP to SigNoz Cloud, written up in
 `docs/OBSERVABILITY.md`. `http.server.request.duration` by route and status is
 the whole of the RED ask - rate, p95, p99, error rate and which endpoint is
 erroring. Metrics go out unsampled and traces at 10%, because deriving the rate
 from sampled spans reports a tenth of the real traffic.
-
-Two things fell out of it that I would otherwise have written by hand. The `pg`
-instrumentation exports `db.client.connection.pending_requests` and `.max`, so
-pool saturation - the failure mode I said I expected first - is covered without
-custom code, and `max` reads 8, matching `PG_POOL_MAX`. And a `POST /events`
-span carries the insert underneath it, which is the view that would have
-answered the 25 second stall in minutes instead of an afternoon in Postgres
-logs.
-
-Alerts are SigNoz-side objects, so the four from the conditions below are
-written up as queries and thresholds rather than committed. Export to SigNoz
-Cloud itself is unverified: what I checked is that the app emits those metrics
-and spans, with those attributes, against a real collector in the cluster. The
-collector-to-SigNoz hop is an endpoint and a key.
-
-I also checked what happens when the backend is down. Collector scaled to zero:
-requests and the smoke test all passed, zero restarts. An observability outage
-does not become a relay outage.
-
-That one needed a fix, though. The SDK reports export failures only at its debug
-level, which also logs a line per request, so a wrong endpoint or a rejected key
-looked exactly like working telemetry. Each exporter now logs one line when it
-starts failing and one when it recovers, verified both ways:
-
-```
-telemetry: trace export failing: connect ECONNREFUSED 10.96.251.236:4318
-telemetry: metric export failing: connect ECONNREFUSED 10.96.251.236:4318
-telemetry: trace export recovered
-telemetry: metric export recovered
-```
 
 ## What I found and left
 

@@ -69,7 +69,6 @@ tools/wait-scaled.sh                        # the HPA has reached minReplicas
 
 The Deployment has no `replicas` field, so it is created at 1 and the HPA
 climbs to 3. Those last two waits are why you get three pods rather than one.
-See `docs/SCALING.md`.
 
 ## Checking it
 
