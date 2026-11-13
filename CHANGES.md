@@ -36,6 +36,26 @@ init container now.
 `"dev": "node --env-file=.env src/server.js"` to `"node src/server.js"`. The
 `.env` it referenced no longer exists.
 
+Added `@opentelemetry/sdk-node`, the OTLP trace and metric exporters, and the
+`http`, `express` and `pg` instrumentations. About 180 packages and 30 MB on
+the image, 258 MB to 288 MB.
+
+## app/src/telemetry.js (new)
+
+OpenTelemetry over OTLP to SigNoz Cloud. Full write-up in
+`docs/OBSERVABILITY.md`; the reasons for the choices are here.
+
+| Decision | Why |
+|---|---|
+| OTLP, not a `/metrics` endpoint | SigNoz is OTLP-native. One pipeline instead of a scrape plus a separate tracing setup, and traces come out of the same instrumentation. |
+| `http`, `express` and `pg` instrumentations, not `auto-instrumentations-node` | The auto package pulls about thirty instrumentations for a service that speaks HTTP and Postgres. These three are what is used. |
+| `express` instrumentation included specifically | It is what produces `http.route`. Without it `GET /events/:id` is one metric series per event id, which is a cardinality problem rather than a dashboard. |
+| `metricReaders: [...]`, plural | The singular `metricReader` that this SDK version's own README documents is accepted and silently ignored. Traces flow, no metric is ever produced, and nothing errors. Caught by checking what reached the collector rather than that the SDK started. |
+| Metrics unsampled, traces at 10% | RED numbers have to be right, and spans are the expensive part. Deriving the rate from spans sampled at 10% reports a tenth of the real traffic. |
+| `/health` and `/live` excluded | Probed every few seconds by every pod. Counted, they are most of the request rate at idle and they drag the percentiles down. Kubernetes already acts on a failing probe. |
+| Starts only if `OTEL_EXPORTER_OTLP_ENDPOINT` is set | Otherwise the SDK defaults to `localhost:4318` and fills the log with connection errors in kind and in CI. |
+| No custom metrics | The `pg` instrumentation already exports `db.client.connection.count`, `.max` and `.pending_requests`, which is the pool saturation signal I was going to write by hand. |
+
 ## app/src/config.js
 
 | Change | Why |
@@ -100,6 +120,13 @@ enough to bury real errors and make a duplicate-key alarm useless.
 |---|---|
 | Removed the `fs`/`path` imports and the write stream; log to `process.stdout` | `LOG_FILE` wrote into the container's writable layer with no volume and no rotation, growing until the node hit DiskPressure and evicted workloads. It also meant `kubectl logs` showed nothing. Removing it is what makes `readOnlyRootFilesystem` possible. |
 
+### Telemetry
+
+| Change | Why |
+|---|---|
+| `require('./telemetry')` as the first statement | The instrumentation patches `express` and `pg` as they load, so it has to run before either require. |
+| `telemetry.shutdown()` alongside `pool.end()` in the drain | Buffered spans and the pending metric interval would otherwise die with the pod, losing exactly the data from a shutdown you were trying to understand. |
+
 ## k8s/base/deployment.yaml
 
 ### Blockers
@@ -111,6 +138,7 @@ enough to bury real errors and make a duplicate-key alarm useless.
 | Added `imagePullPolicy: IfNotPresent` to every container | A `:latest` tag makes the kubelet default to `Always`, so it ignored the image `kind load` had just put on the node and tried to pull from Docker Hub. |
 | Added the `migrate` init container | Moves migrations out of the app container, running once before the app against the same image. |
 | Added the `wait-for-db` init container | `pg_isready` against `DATABASE_URL` every 2s, giving up after 120s. Without it the migrate container crash-loops on a cold cluster until the database answers, which self-heals but reads as a failure. |
+| Added the telemetry env block | `OTEL_EXPORTER_OTLP_ENDPOINT` and `DEPLOY_ENV` from the `relay-env` ConfigMap, the ingestion key from `relay-secrets`, all `optional: true`, plus pod and node name through the downward API into `OTEL_RESOURCE_ATTRIBUTES`. Per-pod attribution is what made the cross-pod replay behaviour provable, and it is the same view you want in SigNoz. |
 
 ### Capacity and availability
 
@@ -137,6 +165,17 @@ enough to bury real errors and make a duplicate-key alarm useless.
 |---|---|
 | Pod `securityContext` (`runAsNonRoot`, `runAsUser`, `seccompProfile`) and per-container (`allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, `capabilities: drop: [ALL]`) | There was no security context at all. Only possible now that nothing writes a log file. |
 
+## k8s/local/relay-env.yaml (new) and k8s/local/otel-collector.yaml (new)
+
+`relay-env` is the per-environment, non-secret half of the config: the OTLP
+endpoint and `DEPLOY_ENV`. Production has its own copy outside the repo, the
+same as the real Secret. The endpoint is not a secret, so it does not belong in
+`relay-secrets`; the ingestion key does and stays there.
+
+`otel-collector.yaml` is a collector with a debug exporter, so the pipeline can
+be checked locally and in CI without a SigNoz key. It is in `local/`, so
+production never gets it.
+
 ## k8s/base/configmap.yaml
 
 | Change | Why |
@@ -144,6 +183,7 @@ enough to bury real errors and make a duplicate-key alarm useless.
 | `PG_POOL_MAX` 25 to 8 | `max_connections` is 100, fixed, and the data team will not raise it. 25 against `maxReplicas: 10` asks for 250. With `connectionTimeoutMillis` at 2s and no queue, exceeding it surfaces as 500s rather than backpressure. 8 x 10 = 80 leaves room for the superuser reserve and the migration connection. |
 | Removed `LOG_FILE` | The disk exhaustion above. |
 | Added `DEDUPE_MAX_ENTRIES` | Makes the cache bound explicit and tunable rather than a code default. |
+| Added `OTEL_SERVICE_NAME`, `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` | Environment-independent, so they belong in `base`. The sampler is config rather than code so the trace volume can be changed without a rebuild. |
 
 ## k8s/base/service.yaml
 
@@ -269,6 +309,15 @@ can never touch the cluster at once, but with `cancel-in-progress: true`, which
 is the one place cancelling is right. A deploy sitting in `rollout status` would
 otherwise make an operator wait up to ten minutes to roll back, and the thing
 being cancelled is the deploy they are rolling back anyway.
+
+## docs/OBSERVABILITY.md (new)
+
+How the telemetry is wired, what arrives, and the four alerts to create with
+the reasoning behind each threshold. Alerts are SigNoz-side objects, so they
+cannot be committed; the queries can be.
+
+Also states plainly what is unverified: the hop from collector to SigNoz Cloud.
+The app side was checked against a real collector in the cluster.
 
 ## Not changed
 

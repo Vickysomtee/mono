@@ -153,6 +153,30 @@ against three pods, plus `npm audit`, `terraform validate` and Trivy. That one
 cancels superseded runs, which is the opposite of the deploy job and
 deliberate.
 
+**Telemetry.** OpenTelemetry over OTLP to SigNoz Cloud, written up in
+`docs/OBSERVABILITY.md`. `http.server.request.duration` by route and status is
+the whole of the RED ask - rate, p95, p99, error rate and which endpoint is
+erroring. Metrics go out unsampled and traces at 10%, because deriving the rate
+from sampled spans reports a tenth of the real traffic.
+
+Two things fell out of it that I would otherwise have written by hand. The `pg`
+instrumentation exports `db.client.connection.pending_requests` and `.max`, so
+pool saturation - the failure mode I said I expected first - is covered without
+custom code, and `max` reads 8, matching `PG_POOL_MAX`. And a `POST /events`
+span carries the insert underneath it, which is the view that would have
+answered the 25 second stall in minutes instead of an afternoon in Postgres
+logs.
+
+Alerts are SigNoz-side objects, so the four from the conditions below are
+written up as queries and thresholds rather than committed. Export to SigNoz
+Cloud itself is unverified: what I checked is that the app emits those metrics
+and spans, with those attributes, against a real collector in the cluster. The
+collector-to-SigNoz hop is an endpoint and a key.
+
+I also checked what happens when the backend is down. Collector scaled to zero,
+30 requests plus the smoke test: all passed, zero restarts, nothing in the app
+log. An observability outage does not become a relay outage.
+
 ## What I found and left
 
 **Terraform** is review-only per the brief, so this is a list, not a diff.
@@ -185,11 +209,9 @@ Would not work if applied:
 Also: EBS unencrypted, archive bucket has no public access block, versioning,
 encryption or lifecycle policy, and nothing is tagged.
 
-**No metrics or alerts.** The biggest remaining gap and I could not close it
-honestly on kind — there is no metrics-server, which is also why the HPA still
-shows `<unknown>` locally. The app needs a `/metrics` endpoint with RED metrics
-on `/events` plus a pool-saturation gauge, because pool saturation is the
-failure mode I would expect first.
+**No metrics-server on kind**, which is why the HPA still shows `<unknown>`
+locally. That is a kind limitation rather than a repo defect - the real defect,
+a missing CPU request, is fixed.
 
 **No real test suite.** `make smoke` covers the behaviour I changed. A proper
 suite needs a database fixture, which is more than I wanted to add this week.
@@ -200,7 +222,7 @@ verifies an incoming signature either, so it is a storage tag, not
 authentication. Left it because changing it invalidates every stored signature
 and that needs a conversation.
 
-**`k8s/postgres.yaml`** is out of scope, but it caused the only stall I saw. At
+**`k8s/local/postgres.yaml`** is out of scope, but it caused the only stall I saw. At
 400 rps the service paused about 25 seconds around t=175s and then drained the
 backlog with no errors. The cause was the local stand-in checkpointing onto an
 `emptyDir`:
@@ -230,17 +252,21 @@ Conditions, in the order I would chase them:
    returns full stored payloads with no auth, behind an internet-facing
    listener on plain HTTP. This is the one that would change my answer to do
    not ship. *Platform, plus me.*
-2. **Someone creates the `relay-deploy` IAM role and the `production`
-   environment before the first deploy runs.** The pipeline expects OIDC and
-   an approval gate; neither exists yet, so the first push to main fails at
-   the credentials step until they do. *Platform, needs an hour.*
+2. **Someone creates the `relay-deploy` IAM role, the `production`
+   environment, and the production `relay-env` ConfigMap.** The pipeline
+   expects OIDC and an approval gate; neither exists yet, so the first push to
+   main fails at the credentials step until they do. `relay-env` carries the
+   SigNoz endpoint, and without it the pods start with telemetry silently off.
+   *Platform, needs an hour.*
 3. **Written confirmation of the connection budget from the data team**, and
    an answer on 400 vs 150 rps, because the pool maths depends on it.
 4. **The Terraform blockers above fixed before the first `apply`.** It has
    never been applied, so Friday is the first time anyone finds out what it
    really does. I would not discover that on launch day. *Me plus security.*
-5. **Metrics and four alerts live** — 5xx rate, p99 latency, pool saturation,
-   CrashLoopBackOff/OOMKill — with someone on call. *Platform.*
+5. **The four alerts in `docs/OBSERVABILITY.md` created, and someone on
+   call.** The metrics they need are arriving; the alerts are not created and
+   the restart alert also needs the SigNoz k8s-infra chart installed, which is
+   a separate job from instrumenting the app. *Platform.*
 
 If 1, 2 and 5 are not done by Thursday, this is a do not ship for me. They are
 all a day's work, which is why the answer is conditions rather than no.

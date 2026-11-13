@@ -106,6 +106,34 @@ spec:
                 secretKeyRef:
                   name: relay-secrets
                   key: SIGNING_SECRET
+            - name: DEPLOY_ENV
+              valueFrom:
+                configMapKeyRef:
+                  name: relay-env
+                  key: DEPLOY_ENV
+                  optional: true
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: relay-env
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+                  optional: true
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              valueFrom:
+                secretKeyRef:
+                  name: relay-secrets
+                  key: OTEL_EXPORTER_OTLP_HEADERS
+                  optional: true
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: k8s.pod.name=$(POD_NAME),k8s.node.name=$(NODE_NAME),deployment.environment=$(DEPLOY_ENV)
           startupProbe:
             httpGet:
               path: /health

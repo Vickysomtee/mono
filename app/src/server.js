@@ -1,5 +1,8 @@
 'use strict';
 
+// Must load before express and pg so the instrumentation can wrap them.
+const telemetry = require('./telemetry');
+
 const crypto = require('node:crypto');
 const express = require('express');
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
@@ -151,7 +154,10 @@ function shutdown(signal) {
   console.log(`${signal} received, draining`);
 
   server.close(() => {
-    pool.end().then(() => process.exit(0), () => process.exit(0));
+    Promise.allSettled([pool.end(), telemetry.shutdown()]).then(
+      () => process.exit(0),
+      () => process.exit(0),
+    );
   });
 
   setTimeout(() => {
