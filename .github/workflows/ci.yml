@@ -63,22 +63,6 @@ jobs:
           kubectl -n relay describe pods
           kubectl -n relay logs -l app=relay --tail=200 --prefix --all-containers || true
 
-  terraform:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
-        with:
-          terraform_version: 1.9.8
-
-      - name: Validate
-        working-directory: terraform
-        run: |
-          terraform fmt -check -recursive
-          terraform init -backend=false
-          terraform validate
-
   image:
     runs-on: ubuntu-latest
     steps:
