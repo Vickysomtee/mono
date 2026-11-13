@@ -1,0 +1,68 @@
+name: rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: "Revision to roll back to. Leave blank for the previous one."
+        required: false
+        default: ""
+      reason:
+        description: "Why. Shows up in the run record."
+        required: true
+
+# Shares the deploy group so a rollback and a deploy cannot touch the cluster at
+# the same time, and pre-empts one: if a deploy is still watching its rollout, a
+# human asking for a rollback should not queue behind it.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: eu-west-1
+  EKS_CLUSTER: relay-prod
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Connect
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+
+      - name: Before
+        env:
+          REASON: ${{ inputs.reason }}
+        run: |
+          echo "reason: $REASON"
+          kubectl -n relay rollout history deployment/relay
+          kubectl -n relay get deployment/relay \
+            -o jsonpath='running {.spec.template.spec.containers[0].image}{"\n"}'
+
+      - name: Roll back
+        env:
+          REVISION: ${{ inputs.revision }}
+        run: |
+          if [ -n "$REVISION" ]; then
+            kubectl -n relay rollout undo deployment/relay --to-revision="$REVISION"
+          else
+            kubectl -n relay rollout undo deployment/relay
+          fi
+          kubectl -n relay rollout status deployment/relay --timeout=10m
+
+      - name: After
+        run: |
+          kubectl -n relay get deployment/relay \
+            -o jsonpath='running {.spec.template.spec.containers[0].image}{"\n"}'
+          kubectl -n relay get pods -l app=relay

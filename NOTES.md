@@ -131,12 +131,21 @@ The rest of that job: `actions/checkout@master` and
 a step holding production AWS credentials, so they are pinned to SHAs and the
 credentials are OIDC now. `:latest` meant nothing was traceable or
 rollback-able, and `rollout restart` only existed to work around pushing the
-same tag — the image is tagged with the commit SHA and `kubectl set image`
-does the rollout. Nothing gated on the result, so the job reported success
-before a single new pod was Ready; it waits on `rollout status` and rolls back
-if that fails. Added a `permissions` block, a `production` environment, and
+same tag — the image is tagged with the commit SHA and a single
+`kubectl patch` does the rollout. Nothing gated on the result, so the job reported success
+before a single new pod was Ready; it waits on `rollout status` now, and
+records the commit as the revision's change-cause so `rollout history` is
+readable. Added a `permissions` block, a `production` environment, and
 `concurrency` that queues rather than cancels, because killing a run mid-apply
 leaves the cluster halfway through a change.
+
+It does not roll back on its own. A bad image never takes traffic, because
+readiness holds it out of the Service and `maxUnavailable` keeps the old pods
+up, so a stalled rollout is already the safe state and undoing it just destroys
+the pods you need the logs from. The case that actually needed an answer is a
+deploy that goes green and starts failing later, and that is `rollback.yml`:
+`workflow_dispatch`, an optional revision, a required reason, sharing the
+deploy concurrency group so the two cannot race.
 
 Nothing ran on a pull request at all, which is the part I would fix first in
 any repo. `ci.yml` builds the image, brings up kind, and runs `make smoke`

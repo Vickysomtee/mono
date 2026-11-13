@@ -212,9 +212,9 @@ version. Related to, but not a fix for, the missing version constraint in
 |---|---|
 | `kubectl apply -f k8s/` to `-f k8s/base/` | See above. This is the one that would have taken production down on the first deploy after launch. |
 | `:latest` to `:${{ github.sha }}` | You could not tell which commit was running, and there was no earlier image to roll back to. The tag is now the commit. |
-| `rollout restart` to `kubectl set image` | `rollout restart` only existed because pushing the same tag does not change the pod spec. With a SHA tag the image change is the rollout. `set image` also updates the `migrate` init container, so migrations run from the same build as the app. |
+| `rollout restart` to `kubectl patch` | `rollout restart` only existed because pushing the same tag does not change the pod spec. With a SHA tag the image change is the rollout. The patch updates the `migrate` init container too, so migrations run from the same build as the app. |
 | Added `rollout status --timeout=10m` | The job went green the moment `rollout restart` was accepted, before a single new pod was Ready. A deploy that crash-looped reported success. |
-| Added `rollout undo` on failure | A failed rollout leaves the old pods serving; this puts the deployment back to a known revision rather than leaving it half-updated. |
+| `set image` and a `change-cause` annotation in one `kubectl patch` | `rollout history` is what you read to pick a revision to go back to, and it was blank. Doing it as two calls relabels the revision that is already there, so the same commit appears twice; one patch puts the annotation on the new ReplicaSet only. |
 | `actions/checkout@master`, `configure-aws-credentials@master` to pinned SHAs | Mutable refs on third-party actions in a job that holds production AWS credentials. Whoever controls those branches could have run code in that context. |
 | Long-lived AWS keys to OIDC `role-to-assume` | `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` never expire and nobody rotates them. With OIDC there is no standing credential in the repo. |
 | Added `permissions: contents: read` | The workflow inherited the org default, which on older repos is write-all on `GITHUB_TOKEN`. |
@@ -222,6 +222,14 @@ version. Related to, but not a fix for, the missing version constraint in
 | Added `concurrency: deploy-production`, `cancel-in-progress: false` | Two pushes in quick succession raced each other. Deploys queue rather than cancel - killing a run mid-apply leaves the cluster halfway through a change with nothing to say which half. |
 | Replaced the hand-rolled ECR login with `amazon-ecr-login` | The `docker login` pipeline had no `--region` and failed silently on a token refresh. |
 | Added `workflow_dispatch` | So a deploy can be re-run without an empty commit. |
+
+There is deliberately no automatic rollback on failure. A bad image never takes
+traffic - the readiness probe holds it out of the Service and `maxUnavailable`
+keeps the old pods serving - so a failed `rollout status` means the rollout
+stalled, which is already the safe state. Undoing it there would tear down the
+crash-looping pods you need the logs from, and it would fire on a rollout that
+was only slower than the timeout. Rollback is a decision someone makes, which
+is what `rollback.yml` is for.
 
 ## .github/workflows/ci.yml (new)
 
@@ -244,6 +252,23 @@ opposite of the deploy job and deliberately so.
 The `app` job is not a test suite - there is no test suite, and a real one
 needs a database fixture. `e2e` is the behavioural gate, and it fails against
 the old in-memory dedupe as soon as there is more than one pod.
+
+## .github/workflows/rollback.yml (new)
+
+The failure the pipeline could not handle was a deploy that goes green and
+starts failing twenty minutes later. Nothing in the repo turned that around;
+you needed someone with cluster credentials on their laptop.
+
+`workflow_dispatch` with an optional revision - blank means the previous one -
+and a required reason that lands in the run record. It prints the history and
+the running image before and after, waits on `rollout status`, and never
+touches the repo: no checkout, nothing but `kubectl rollout undo`.
+
+It shares the `deploy-production` concurrency group so a rollback and a deploy
+can never touch the cluster at once, but with `cancel-in-progress: true`, which
+is the one place cancelling is right. A deploy sitting in `rollout status` would
+otherwise make an operator wait up to ten minutes to roll back, and the thing
+being cancelled is the deploy they are rolling back anyway.
 
 ## Not changed
 

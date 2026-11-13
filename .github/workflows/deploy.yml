@@ -42,17 +42,24 @@ jobs:
           docker push "$ECR_REPO:$GITHUB_SHA"
 
       - name: Deploy
+        env:
+          ACTOR: ${{ github.actor }}
         run: |
           aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
           kubectl apply -f k8s/base/
-          kubectl -n relay set image deployment/relay \
-            relay="$ECR_REPO:$GITHUB_SHA" \
-            migrate="$ECR_REPO:$GITHUB_SHA"
-          kubectl -n relay rollout status deployment/relay --timeout=10m
 
-      - name: Roll back
-        if: failure()
-        run: |
-          aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
-          kubectl -n relay rollout undo deployment/relay
+          # One patch rather than set image plus annotate, so the change-cause
+          # lands on the new ReplicaSet only. Annotating separately relabels
+          # the revision that is already there and `rollout history` then
+          # names the same commit twice, which is what the rollback workflow
+          # reads to pick a revision.
+          kubectl -n relay patch deployment/relay -p "$(jq -nc \
+            --arg image "$ECR_REPO:$GITHUB_SHA" \
+            --arg cause "$GITHUB_SHA by $ACTOR (run $GITHUB_RUN_ID)" \
+            '{metadata:{annotations:{"kubernetes.io/change-cause":$cause}},
+              spec:{template:{spec:{
+                containers:[{name:"relay",image:$image}],
+                initContainers:[{name:"migrate",image:$image}]}}}}')"
+
           kubectl -n relay rollout status deployment/relay --timeout=10m
+          kubectl -n relay rollout history deployment/relay
