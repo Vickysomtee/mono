@@ -11,12 +11,13 @@ working service.
 | Change | Why |
 |---|---|
 | `COPY package.json .` to `COPY package.json package-lock.json ./` | **Blocker.** `npm ci` refuses to run without a lockfile, so the build failed before anything else could be reached. |
-| `FROM node:22` to `node:22-slim` | The full Debian image is about 1.1 GB with a large CVE surface. The image is now 262 MB. |
+| `FROM node:22` to `node:22-slim` | The full Debian image is about 1.1 GB with a large CVE surface. The image is now 258 MB. |
 | `COPY . .` + `RUN rm -f .env` to `COPY src ./src` | The old form copied `.env` into a layer and deleted it in a later one. Deleted files stay readable in the earlier layer, so the staging password shipped inside any image pushed to ECR. |
 | Added `USER node` | The container ran as root. Nothing needs root at runtime. |
 | `EXPOSE 3000` to `8080` | Simply wrong, and misleading to the next person. |
 | `ENTRYPOINT ["sh", "./entrypoint.sh"]` to `CMD ["node", "src/server.js"]` | `sh` became PID 1 and npm does not forward signals, so SIGTERM never reached node and every pod was SIGKILLed after the grace period with requests in flight. |
 | `--max-old-space-size=512` to `384` | The heap was above the 256Mi container limit, so the kernel killed the container before V8 had any reason to collect. Raising this is what the previous owner did about the OOMs, and it made them worse. |
+| Split into a `deps` build stage and removed npm from the runtime image | Nothing at runtime shells out to npm, and the npm that `node:22-slim` ships carries its own bundled dependency tree - `pacote`, `sigstore`, `picomatch`, `brace-expansion`, `ip-address`. Those were the only 10 HIGH findings in the Trivy job, and none of them are the app's dependencies, which `npm audit` reports clean. Deleting a package manager from a production image is the fix; muting the scanner is not. |
 
 ## app/.dockerignore (new)
 
