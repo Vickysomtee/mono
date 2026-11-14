@@ -64,9 +64,17 @@ OpenTelemetry over OTLP to SigNoz Cloud. Full write-up in
 |---|---|
 | `port` default 3000 to 8080 | The contract is 8080 everywhere. A default that contradicts it invites the mismatch that broke this deploy. |
 | `poolMax` default 25 to 8 | See the connection budget under `k8s/base/configmap.yaml`. |
+| Added `pgMaxLifetimeSeconds`, default 1800 | `pg-pool` never recycles a connection otherwise, so after a database failover the pool can hold sockets to the old primary until a query errors on one. |
 | `dedupeMaxEntries` default 0 to 10000, dropped the `0 means "no limit"` comment | A default meaning unbounded is a footgun: omitting the variable gave you an infinite cache. |
 | Removed `logFile` | Backs out file logging entirely. |
 | Added `shutdownGraceMs` | Needed by the drain path so the hard-exit timer is tunable. |
+
+## app/src/db.js
+
+| Change | Why |
+|---|---|
+| Set `idleTimeoutMillis: 10000` explicitly | It was already the `pg-pool` default and the connection budget depends on it, so it is worth stating rather than inheriting. With `min` at 0 a quiet pod drops to zero connections and stops holding part of the 100. |
+| Added `maxLifetimeSeconds` from config | Connections otherwise live forever, so a failover can leave the pool holding sockets to the old primary until a query errors on one. |
 
 ## app/src/migrate.js
 
@@ -152,6 +160,7 @@ enough to bury real errors and make a duplicate-key alarm useless.
 | `limits.memory` 256Mi to 512Mi | Keeps the limit above the 384 MB heap so V8 can collect before the kernel intervenes. |
 | `whenUnsatisfiable: DoNotSchedule` to `ScheduleAnyway` | In production the node group is pinned to a single subnet, so a strict zone spread buys nothing and risks unschedulable pods. |
 | Added `terminationGracePeriodSeconds: 30` | Makes the drain window explicit rather than implied. |
+| Pinned `strategy: maxSurge 1, maxUnavailable 0` | The default `maxSurge: 25%` rounds up, so a deploy at `maxReplicas: 10` runs 13 pods at once: 13 x 8 = 104 connections against a cap of 100, plus one per starting pod for the migration. It would surface as `too many clients already` in an init container and read like a migration fault rather than a capacity one. `maxUnavailable: 0` keeps full capacity through the rollout; the cost is that a 10-pod rollout goes one pod at a time. |
 | Added `preStop: sleep 5` | Gives endpoint deregistration time to propagate before the process stops accepting, closing the last gap in the rolling update. |
 
 ### Probes

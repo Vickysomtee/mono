@@ -25,6 +25,7 @@ module.exports = {
   databaseUrl: required('DATABASE_URL'),
   signingSecret: required('SIGNING_SECRET'),
   poolMax: int('PG_POOL_MAX', 8),
+  pgMaxLifetimeSeconds: int('PG_MAX_LIFETIME_SECONDS', 1800),
   dedupeMaxEntries: int('DEDUPE_MAX_ENTRIES', 10000),
   archiveBucket: process.env.ARCHIVE_BUCKET || '',
   shutdownGraceMs: int('SHUTDOWN_GRACE_MS', 10000),

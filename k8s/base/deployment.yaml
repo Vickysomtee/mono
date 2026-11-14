@@ -14,6 +14,14 @@ spec:
   selector:
     matchLabels:
       app: relay
+  # The default maxSurge of 25% is 3 extra pods at maxReplicas: 10, so a
+  # deploy at full scale would run 13 pods x PG_POOL_MAX 8 = 104 connections
+  # against a 100 cap. One at a time keeps the worst case at 11 pods, 88
+  # connections, plus one per starting pod for the migration.
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   template:
     metadata:
       labels:

@@ -53,7 +53,9 @@ asserts this and fails against the old code once you scale past one pod.
 raise it. `PG_POOL_MAX` was 25 against `maxReplicas: 10`, which asks for 250.
 With `connectionTimeoutMillis` at 2s and no queue, exceeding it surfaces as
 500s rather than backpressure. Now 8, so 8 x 10 = 80 with room for the
-superuser reserve and the migration connection.
+superuser reserve and the migration connection. That is the steady-state
+number; a rolling deploy at full scale surges past it, which is why the
+Deployment now pins `maxSurge: 1` instead of taking the 25% default.
 
 **HPA could not scale.** Scaling on CPU utilisation also needs a CPU
 request and only `limits.memory` was set, so it reported `<unknown>` and sat at
@@ -183,11 +185,14 @@ Conditions, in the order I would chase them:
    returns full stored payloads with no auth, behind an internet-facing
    listener on plain HTTP. This is the one that would change my answer to do
    not ship. *Platform, plus me.*
-2. **PgBouncer to handle connection pooling.** 400 rps is still a wide gap to
-   be sustained by 100 max client connections. If the cap is a strict decision
-   from the data team, I would put PgBouncer in: a lightweight connection
-   pooler that sits between the application and the database, multiplexing
-   many client connections onto a small, reusable pool of backend ones.
+2. **PgBouncer, if the 100 cap is immovable.** The cap binds on pod count,
+   not on throughput - the load test sustained 400 rps using 9 connections.
+   But `PG_POOL_MAX: 8` across `maxReplicas: 10` is 80, and the default 25%
+   `maxSurge` would take a deploy at full scale to 13 pods and 104, over the
+   cap. `maxSurge: 1` holds it at 88 for now. PgBouncer is the real fix:
+   it multiplexes many client connections onto a small pool of backend ones,
+   so scaling out stops spending the budget. *Needs the data team's answer
+   first.*
 3. **A secret manager.** The database credentials are a Kubernetes Secret,
    which is base64, not encryption - anyone who can read Secrets in the
    namespace can decode them. Standard practice is a real secret manager:
