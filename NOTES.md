@@ -52,9 +52,10 @@ asserts this and fails against the old code once you scale past one pod.
 **Connection budget.** The database caps at 100 and the data team will not
 raise it. `PG_POOL_MAX` was 25 against `maxReplicas: 10`, which asks for 250.
 With `connectionTimeoutMillis` at 2s and no queue, exceeding it surfaces as
-500s rather than backpressure. Now 8, so 8 x 10 = 80 at full scale. The 25% `maxSurge` default would have added three more pods during a
-deploy and taken that to 104, so the Deployment pins `maxSurge: 1` and tops
-out at 89 including the migration connection.
+500s rather than backpressure. Now 8, so 8 x 10 = 80 at full scale. The 25%
+`maxSurge` default would have added three more pods during a deploy and taken
+that to 104, so the Deployment pins `maxSurge: 1` and tops out at 89 including
+the migration connection.
 
 **HPA could not scale.** Scaling on CPU utilisation also needs a CPU
 request and only `limits.memory` was set, so it reported `<unknown>` and sat at
