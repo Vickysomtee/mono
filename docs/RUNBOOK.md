@@ -24,7 +24,7 @@ make up
 make smoke
 ```
 
-`make up` is `cluster` then `build` then `load` then `deploy`. On a cold
+`make up` is `cluster`, `build`, `load`, `preload`, `deploy`. On a cold
 machine expect **three to five minutes**, most of it pulling images:
 `kindest/node`, `postgres:16-alpine`, `otel/opentelemetry-collector-contrib`
 and `metrics-server`. It is not hung.
@@ -37,6 +37,7 @@ and `metrics-server`. It is not hung.
 make cluster   # kind create cluster --config kind-config.yaml
 make build     # docker build -t relay:latest app
 make load      # kind load docker-image relay:latest --name relay
+make preload   # hand the nodes the three upstream images
 make deploy    # kubectl apply, then wait for everything to be real
 ```
 
@@ -53,6 +54,13 @@ maps container port 30080 to host port 8080, which is how
 `imagePullPolicy: IfNotPresent`, so the kubelet uses the copy `kind load` puts
 on the nodes. Skip it and the pods try to pull `relay:latest` from Docker Hub
 and fail.
+
+**`make preload`** does the same for Postgres, the collector and
+metrics-server: pulls each on the host if it is missing, then `kind load`s it.
+The nodes can fetch those themselves, but a kind node's pull is the one step
+with no useful output - a stalled pull and a slow pull both look like a pod in
+`ContainerCreating` - and the host's cache is shared across clusters, so
+rebuilding a cluster does not re-download them.
 
 **`make deploy`** applies the namespace, then `k8s/local/`, then `k8s/base/`,
 in that order, so Postgres and metrics-server are running before the relay
@@ -189,9 +197,32 @@ kubectl api-resources --api-group=metrics.k8s.io    # empty means the APIService
 **`ErrImagePull` or `ImagePullBackOff` on relay.** You skipped `make load`, or
 rebuilt without reloading. Run `make build load` and restart the deployment.
 
+**A pod sits in `ContainerCreating` for minutes with no error, and
+`make deploy` eventually fails with `timed out waiting for the condition`.**
+The node is stuck inside an image pull. There is no event for it - a stalled
+pull looks identical to a slow one - so check whether the image arrived:
+
+```sh
+docker exec relay-worker crictl images | grep postgres
+kubectl -n relay describe pod <pod> | sed -n '/Events:/,$p'
+```
+
+A `Pulling` event with no `Pulled` after a couple of minutes is a stall.
+Hand the node the image from the host instead:
+
+```sh
+make preload
+kubectl -n relay delete pod <pod>
+```
+
+The delete is not optional. `kind load` puts the image on the node, but a
+kubelet already inside a pull attempt does not look again until the pod is
+recreated, so the pod stays in `ContainerCreating` even though the image is
+now local. `make up` runs `preload` for exactly this reason; `make deploy` on
+its own does not.
+
 **`net/http: TLS handshake timeout` while pulling.** Docker Desktop routing
-through a stale proxy. Restart Docker Desktop and pull the image directly
-(`docker pull postgres:16-alpine`) before re-running.
+through a stale proxy. Restart Docker Desktop, then `make preload`.
 
 **`CreateContainerConfigError`.** A Secret or ConfigMap key the Deployment
 asks for does not exist. `kubectl -n relay describe pod <pod>` names it.
