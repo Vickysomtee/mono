@@ -52,10 +52,9 @@ asserts this and fails against the old code once you scale past one pod.
 **Connection budget.** The database caps at 100 and the data team will not
 raise it. `PG_POOL_MAX` was 25 against `maxReplicas: 10`, which asks for 250.
 With `connectionTimeoutMillis` at 2s and no queue, exceeding it surfaces as
-500s rather than backpressure. Now 8, so 8 x 10 = 80 with room for the
-superuser reserve and the migration connection. That is the steady-state
-number; a rolling deploy at full scale surges past it, which is why the
-Deployment now pins `maxSurge: 1` instead of taking the 25% default.
+500s rather than backpressure. Now 8, so 8 x 10 = 80 at full scale. The 25% `maxSurge` default would have added three more pods during a
+deploy and taken that to 104, so the Deployment pins `maxSurge: 1` and tops
+out at 89 including the migration connection.
 
 **HPA could not scale.** Scaling on CPU utilisation also needs a CPU
 request and only `limits.memory` was set, so it reported `<unknown>` and sat at
@@ -185,14 +184,15 @@ Conditions, in the order I would chase them:
    returns full stored payloads with no auth, behind an internet-facing
    listener on plain HTTP. This is the one that would change my answer to do
    not ship. *Platform, plus me.*
-2. **PgBouncer, if the 100 cap is immovable.** The cap binds on pod count,
-   not on throughput - the load test sustained 400 rps using 9 connections.
-   But `PG_POOL_MAX: 8` across `maxReplicas: 10` is 80, and the default 25%
-   `maxSurge` would take a deploy at full scale to 13 pods and 104, over the
-   cap. `maxSurge: 1` holds it at 88 for now. PgBouncer is the real fix:
-   it multiplexes many client connections onto a small pool of backend ones,
-   so scaling out stops spending the budget. *Needs the data team's answer
-   first.*
+2. **Confirmation that the cap is really 100.** Eight per pod is generous -
+   the load test held 400 rps on nine connections - but eight across
+   `maxReplicas: 10` is 80, and 89 during a deploy. That fits, with whatever
+   the database reserves for superusers coming out of the same 100. It also
+   means `maxReplicas` cannot rise, and nothing else can share this database,
+   without redoing the sum. The database is not in the Terraform, so the
+   number is one I am taking on trust. If it cannot move, PgBouncer is the
+   fix: one pooler holding a few backend connections, so adding pods stops
+   costing any. *Data team.*
 3. **A secret manager.** The database credentials are a Kubernetes Secret,
    which is base64, not encryption - anyone who can read Secrets in the
    namespace can decode them. Standard practice is a real secret manager:
