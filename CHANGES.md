@@ -375,12 +375,8 @@ timeouts on image pulls. Each one with the command that tells you which it is.
 
 ## docs/OBSERVABILITY.md (new)
 
-How the telemetry is wired, what arrives, and the four alerts to create with
-the reasoning behind each threshold. Alerts are SigNoz-side objects, so they
-cannot be committed; the queries can be.
-
-Also states plainly what is unverified: the hop from collector to SigNoz Cloud.
-The app side was checked against a real collector in the cluster.
+How the telemetry is wired, which metrics and spans arrive with which
+attributes, and how to tell a working exporter from a silent one.
 
 ## Not changed
 

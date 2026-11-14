@@ -57,22 +57,6 @@ pod, so counted they are most of the request rate when nothing is happening and
 they pull the percentiles down. A failing probe is already acted on by
 Kubernetes and covered by the restart alert below.
 
-## Alerts to create
-
-Thresholds are starting points, not measured SLOs. The load test ran at 400 rps
-with p50 10ms, p95 19ms, p99 56ms and no errors, so these sit well above
-observed healthy behaviour.
-
-| Alert | Condition | Why this number |
-|---|---|---|
-| 5xx rate | `http.response.status_code >= 500` over total > 1% for 5m | Clients retry hard on anything that is not a 409, so errors amplify. |
-| p99 latency | p99 of `http.server.request.duration` > 500ms for 10m | Roughly 10x the observed p99. Below that is noise. |
-| Pool saturation | `db.client.connection.pending_requests` > 0 for 2m | Leading indicator. Requests queue here before `connectionTimeoutMillis` turns them into 500s, so this fires before the 5xx alert. |
-| Pod restarts | `kube_pod_container_status_restarts_total` increasing, or OOMKilled | Needs the SigNoz k8s-infra chart, which is a separate install from app instrumentation. |
-
-The first three come from app data that is already arriving. The fourth does
-not: it needs cluster metrics collected, which nobody has set up yet.
-
 ## Confirming it works
 
 The startup line only proves the SDK started:
@@ -96,27 +80,3 @@ means `OTEL_EXPORTER_OTLP_ENDPOINT` did not reach the pod.
 Pods need outbound 443 to `ingest.<region>.signoz.cloud`. The nodes are in
 public subnets, so this works today, but an egress NetworkPolicy would break it
 and the only symptom is the export-failing line above.
-
-## A sampling consequence worth knowing
-
-SigNoz's Services view builds its numbers from the spans it receives. At 10%
-sampling the request rate there reads about a tenth of the truth. Latency
-percentiles are roughly right, because a uniform sample does not shift the
-distribution, and error rate as a ratio is roughly right too, but counts are
-not.
-
-So build the RED dashboard and the alerts on `http.server.request.duration`,
-which is unsampled, and treat the Services view as a way in to traces rather
-than a source of numbers. If you would rather have one source of truth, set
-`OTEL_TRACES_SAMPLER_ARG` to `1.0` in `relay-config` and accept the span
-volume: at 400 rps that is roughly 34 million spans a day.
-
-## Not done
-
-No logs pipeline. Access logs go to stdout as JSON and are whatever the cluster
-does with stdout. Correlating a log line to a trace needs the trace id in the
-log, which is a small change and worth doing once there is a reason to.
-
-Export to SigNoz Cloud itself is unverified. What was checked is that the app
-emits the metrics and spans above, with those attributes, against a real
-collector. The hop from collector to SigNoz is endpoint and key.
