@@ -194,10 +194,15 @@ Conditions, in the order I would chase them:
    number is one I am taking on trust. If it cannot move, PgBouncer is the
    fix: one pooler holding a few backend connections, so adding pods stops
    costing any. *Data team.*
-3. **A secret manager.** The database credentials are a Kubernetes Secret,
-   which is base64, not encryption - anyone who can read Secrets in the
-   namespace can decode them. Standard practice is a real secret manager:
-   Vault, Infisical or Doppler.
+3. **Move the secrets into a secret manager.** `relay-secrets` holds
+   `DATABASE_URL` and `SIGNING_SECRET` as base64, which is encoding, not
+   encryption - anyone who can read Secrets in that namespace can decode
+   them, and they sit in etcd and in whatever backs etcd up. The Terraform
+   already provisions `aws_secretsmanager_secret` for the database URL and
+   nothing consumes it, so the missing half is the consuming side: External
+   Secrets Operator or the Secrets Store CSI driver projecting it into the
+   pod, with no long-lived Secret of our own. `SIGNING_SECRET` needs adding
+   there too. *Platform.*
 
 ## Questions I would have asked
 
