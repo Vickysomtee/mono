@@ -183,16 +183,18 @@ Conditions, in the order I would chase them:
    returns full stored payloads with no auth, behind an internet-facing
    listener on plain HTTP. This is the one that would change my answer to do
    not ship. *Platform, plus me.*
-2. **Written confirmation of the connection budget from the data team**, and
-   an answer on 400 vs 150 rps, because the pool maths depends on it.
+2. **PgBouncer to handle connection pooling.** 400 rps is still a wide gap to
+   be sustained by 100 max client connections. If the cap is a strict decision
+   from the data team, I would put PgBouncer in: a lightweight connection
+   pooler that sits between the application and the database, multiplexing
+   many client connections onto a small, reusable pool of backend ones.
+3. **A secret manager.** The database credentials are a Kubernetes Secret,
+   which is base64, not encryption - anyone who can read Secrets in the
+   namespace can decode them. Standard practice is a real secret manager:
+   Vault, Infisical or Doppler.
 
 ## Questions I would have asked
 
 1. **Is peak 400 rps or 150?** The README says 400, the handoff says 150, and
    the load tool defaults to 150. I sized for 400. Nearly every capacity
    decision moves if that is wrong.
-2. **Is `max_connections = 100` really immovable?** It is the binding
-   constraint on how far this scales. If it cannot move, I would rather put
-   PgBouncer in now than discover the ceiling during launch.
-
-
