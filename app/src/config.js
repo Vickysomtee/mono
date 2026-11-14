@@ -21,12 +21,11 @@ function int(name, fallback) {
 }
 
 module.exports = {
-  port: int('PORT', 3000),
+  port: int('PORT', 8080),
   databaseUrl: required('DATABASE_URL'),
   signingSecret: required('SIGNING_SECRET'),
-  poolMax: int('PG_POOL_MAX', 25),
-  // 0 means "no limit"
-  dedupeMaxEntries: int('DEDUPE_MAX_ENTRIES', 0),
-  logFile: process.env.LOG_FILE || '',
+  poolMax: int('PG_POOL_MAX', 8),
+  dedupeMaxEntries: int('DEDUPE_MAX_ENTRIES', 10000),
   archiveBucket: process.env.ARCHIVE_BUCKET || '',
+  shutdownGraceMs: int('SHUTDOWN_GRACE_MS', 10000),
 };

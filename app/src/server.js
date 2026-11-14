@@ -1,23 +1,17 @@
 'use strict';
 
+// Must load before express and pg so the instrumentation can wrap them.
+const telemetry = require('./telemetry');
+
 const crypto = require('node:crypto');
-const fs = require('node:fs');
-const path = require('node:path');
 const express = require('express');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 
 const config = require('./config');
 const { pool } = require('./db');
 
-// ---------------------------------------------------------------- logging
-
-let accessLog = process.stdout;
-if (config.logFile) {
-  fs.mkdirSync(path.dirname(config.logFile), { recursive: true });
-  accessLog = fs.createWriteStream(config.logFile, { flags: 'a' });
-}
-
 function logRequest(req, res, startedAt) {
-  accessLog.write(
+  process.stdout.write(
     JSON.stringify({
       ts: new Date().toISOString(),
       method: req.method,
@@ -29,28 +23,21 @@ function logRequest(req, res, startedAt) {
   );
 }
 
-// ------------------------------------------------------------ idempotency
-
-// Clients retry with the same Idempotency-Key. Replays are answered from
-// memory so a retry storm never reaches the database.
+// Replays are answered from this cache when we have seen the key on this pod,
+// and from the unique index on idempotency_key when we have not.
 const seen = new Map();
 
-function remember(key, entry) {
-  seen.set(key, entry);
-  if (config.dedupeMaxEntries > 0 && seen.size > config.dedupeMaxEntries) {
+function remember(key, id) {
+  seen.set(key, id);
+  if (seen.size > config.dedupeMaxEntries) {
     seen.delete(seen.keys().next().value);
   }
 }
 
-// ---------------------------------------------------------------- archive
-
-let s3 = null;
+const s3 = config.archiveBucket ? new S3Client({}) : null;
 
 async function archive(id, payload) {
-  if (!config.archiveBucket) return;
-  const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
-  // No explicit credentials: the SDK picks them up from the environment.
-  if (!s3) s3 = new S3Client({});
+  if (!s3) return;
   await s3.send(
     new PutObjectCommand({
       Bucket: config.archiveBucket,
@@ -60,8 +47,6 @@ async function archive(id, payload) {
     }),
   );
 }
-
-// -------------------------------------------------------------------- app
 
 const app = express();
 app.disable('x-powered-by');
@@ -73,7 +58,16 @@ app.use((req, res, next) => {
   next();
 });
 
+let shuttingDown = false;
+
+app.get('/live', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
 app.get('/health', async (req, res) => {
+  if (shuttingDown) {
+    return res.status(503).json({ status: 'draining' });
+  }
   try {
     await pool.query('SELECT 1');
     res.json({ status: 'ok' });
@@ -88,9 +82,9 @@ app.post('/events', async (req, res) => {
     return res.status(400).json({ error: 'Idempotency-Key header is required' });
   }
 
-  const previous = seen.get(key);
-  if (previous) {
-    return res.status(409).json({ id: previous.id, duplicate: true });
+  const cached = seen.get(key);
+  if (cached) {
+    return res.status(409).json({ id: cached, duplicate: true });
   }
 
   const id = crypto.randomUUID();
@@ -101,17 +95,35 @@ app.post('/events', async (req, res) => {
     .digest('hex');
 
   try {
-    await pool.query(
-      'INSERT INTO events (id, idempotency_key, payload, signature) VALUES ($1, $2, $3, $4)',
+    const inserted = await pool.query(
+      `INSERT INTO events (id, idempotency_key, payload, signature)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (idempotency_key) DO NOTHING
+       RETURNING id`,
       [id, key, payload, signature],
     );
-    remember(key, { id, payload, signature });
-    await archive(id, payload);
-    res.status(201).json({ id, signature });
+
+    if (inserted.rowCount === 0) {
+      const { rows } = await pool.query(
+        'SELECT id FROM events WHERE idempotency_key = $1',
+        [key],
+      );
+      if (rows.length === 0) {
+        console.error('conflict on %s but no row found', key);
+        return res.status(500).json({ error: 'internal error' });
+      }
+      remember(key, rows[0].id);
+      return res.status(409).json({ id: rows[0].id, duplicate: true });
+    }
   } catch (err) {
     console.error('failed to store event:', err.message);
-    res.status(500).json({ error: 'internal error' });
+    return res.status(500).json({ error: 'internal error' });
   }
+
+  remember(key, id);
+  res.status(201).json({ id, signature });
+
+  archive(id, payload).catch((err) => console.error('archive failed:', id, err.message));
 });
 
 app.get('/events/:id', async (req, res) => {
@@ -128,6 +140,31 @@ app.get('/events/:id', async (req, res) => {
   }
 });
 
-app.listen(config.port, () => {
+const server = app.listen(config.port, () => {
   console.log(`relay listening on :${config.port} (pool max ${config.poolMax})`);
 });
+
+// Must stay above the ALB idle timeout or the balancer reuses sockets we just closed.
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
+
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`${signal} received, draining`);
+
+  server.close(() => {
+    Promise.allSettled([pool.end(), telemetry.shutdown()]).then(
+      () => process.exit(0),
+      () => process.exit(0),
+    );
+  });
+
+  setTimeout(() => {
+    console.error('grace period expired, exiting');
+    process.exit(1);
+  }, config.shutdownGraceMs).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

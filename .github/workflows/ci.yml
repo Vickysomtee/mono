@@ -1,0 +1,79 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Superseded runs on the same branch are worth nothing, so cancel them.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install
+        working-directory: app
+        run: npm ci
+
+      - name: Syntax check
+        working-directory: app
+        run: find src -name '*.js' -print0 | xargs -0 -n1 node --check
+
+      - name: Audit
+        working-directory: app
+        run: npm audit --omit=dev --audit-level=high
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build image
+        run: make build
+
+      - uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
+        with:
+          config: kind-config.yaml
+          cluster_name: relay
+
+      - name: Load and deploy
+        run: make load deploy
+
+      - name: Smoke
+        run: make smoke
+
+      - name: Dump state on failure
+        if: failure()
+        run: |
+          kubectl -n relay get pods -o wide
+          kubectl -n relay describe pods
+          kubectl -n relay logs -l app=relay --tail=200 --prefix --all-containers || true
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build image
+        run: make build
+
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: relay:latest
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: 1

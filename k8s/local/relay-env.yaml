@@ -1,0 +1,11 @@
+# Per-environment, non-secret settings. Production has its own copy of this
+# object pointing at SigNoz Cloud; it is not in the repo, same as the real
+# Secret. Without it the app starts with telemetry off.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: relay-env
+  namespace: relay
+data:
+  DEPLOY_ENV: local
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
