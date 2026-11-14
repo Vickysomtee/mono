@@ -64,17 +64,9 @@ OpenTelemetry over OTLP to SigNoz Cloud. Full write-up in
 |---|---|
 | `port` default 3000 to 8080 | The contract is 8080 everywhere. A default that contradicts it invites the mismatch that broke this deploy. |
 | `poolMax` default 25 to 8 | See the connection budget under `k8s/base/configmap.yaml`. |
-| Added `pgMaxLifetimeSeconds`, default 1800 | `pg-pool` never recycles a connection otherwise, so after a database failover the pool can hold sockets to the old primary until a query errors on one. |
 | `dedupeMaxEntries` default 0 to 10000, dropped the `0 means "no limit"` comment | A default meaning unbounded is a footgun: omitting the variable gave you an infinite cache. |
 | Removed `logFile` | Backs out file logging entirely. |
 | Added `shutdownGraceMs` | Needed by the drain path so the hard-exit timer is tunable. |
-
-## app/src/db.js
-
-| Change | Why |
-|---|---|
-| Set `idleTimeoutMillis: 10000` explicitly | It was already the `pg-pool` default and the connection budget depends on it, so it is worth stating rather than inheriting. With `min` at 0 a quiet pod drops to zero connections and stops holding part of the 100. |
-| Added `maxLifetimeSeconds` from config | Connections otherwise live forever, so a failover can leave the pool holding sockets to the old primary until a query errors on one. |
 
 ## app/src/migrate.js
 
